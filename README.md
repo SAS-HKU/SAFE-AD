@@ -1,5 +1,5 @@
 # RIPPLE
-## Risk-Informed Physics-Based Policy Learning for Externality-Aware Driving
+## Risk-Informed Physics-Based Policy Learning for Externality-Aware Autonomous Driving
 
 ### This repo is for HKU IDS RPG programme DATA8007 Project Submission
 
