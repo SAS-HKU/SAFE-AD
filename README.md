@@ -1,4 +1,4 @@
-# RIPPLE
+<img width="1600" height="900" alt="image" src="https://github.com/user-attachments/assets/08bae038-e59e-471e-9d83-c6b885fc9816" /># RIPPLE
 ## Risk-Informed Physics-Based Policy Learning for Externality-Aware Autonomous Driving
 
 ### This repo is for HKU IDS RPG programme DATA8007 Project Submission
@@ -14,7 +14,9 @@ python pinn_risk_field.py --dataset inD --recording all --epochs 3000 --q_smooth
 ```
 ### demonstrations of the numerically solved risk field and PINN generated risk field:
 ![PINN_examples](assests/DRIFT_PINN_1.gif)
-
+### PINN field output in various environment configurations (highway, highway with merging, roundabout, intersection)
+The environment configurations are forked from [HighwayEnv](https://github.com/Farama-Foundation/HighwayEnv.git)
+![PINN_scenario](assests/pinn_result.jpg)
 ### Dataset processing
 ```
 # Load the recorded trajectories:
