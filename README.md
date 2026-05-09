@@ -15,8 +15,10 @@ python pinn_risk_field.py --dataset inD --recording all --epochs 3000 --q_smooth
 ### demonstrations of the numerically solved risk field and PINN generated risk field:
 ![PINN_examples](assests/DRIFT_PINN_1.gif)
 ### PINN field output in various environment configurations (highway, highway with merging, roundabout, intersection)
-The environment configurations are forked from [HighwayEnv](https://github.com/Farama-Foundation/HighwayEnv.git)
 ![PINN_scenario](assests/pinn_result.jpg)
+
+(The environment configurations are forked from [HighwayEnv](https://github.com/Farama-Foundation/HighwayEnv.git))
+
 ### Dataset processing
 ```
 # Load the recorded trajectories:
