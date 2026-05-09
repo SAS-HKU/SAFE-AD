@@ -1,4 +1,4 @@
-<img width="1600" height="900" alt="image" src="https://github.com/user-attachments/assets/08bae038-e59e-471e-9d83-c6b885fc9816" /># RIPPLE
+
 ## Risk-Informed Physics-Based Policy Learning for Externality-Aware Autonomous Driving
 
 ### This repo is for HKU IDS RPG programme DATA8007 Project Submission
