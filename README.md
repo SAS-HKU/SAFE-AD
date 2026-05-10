@@ -48,8 +48,6 @@ python uncertainty_merger.py --models "RL-PPO" "IDEAM" --steps 100 --rl-policy-m
 ```
 ### Complete Implementation (updated on 25 Apr 2026)
 ```bash
-cd C:/RiskFlow\_RL
-
 # Train BC (if not already trained)
 python -m rl.train\_bc --out rl/checkpoints/decision\_policy\_bc.pt
 
