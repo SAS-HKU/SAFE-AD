@@ -103,35 +103,8 @@ Comparing the Social-friendly and risk-aware RL agent with the baseline RL and I
 | TD3 | Continuous `Box([-1,1]^2)` | `matched_*_continuous` or `matched_*_respawn_continuous` |
 | DDPG | Continuous `Box([-1,1]^2)` | `matched_*_continuous` or `matched_*_respawn_continuous` |
 
-Stock protocols use MetaDrive's default observation and reward. Social-risk
-protocols append the 8-D DRIFT risk feature vector, apply risk/comfort reward
-shaping, and compute risk exposure metrics.
+Stock protocols use MetaDrive's default observation and reward. Our protocols append the PINN learned risk feature vector, apply risk/comfort reward shaping, and compute risk exposure metrics.
 
-### Reward Profiles
-
-The old successful social-risk checkpoint used the stable risk-only shaping:
-
-```text
-r_t = r_t^MD - lambda_R R_t(0,0)
-```
-
-Use this as the main training profile first:
-
-```powershell
---reward-profile risk_only
-```
-
-Comfort-aware training is an ablation after the moving policy is working:
-
-```powershell
---reward-profile comfort_light
---reward-profile risk_comfort
-```
-
-If a social-risk specialist policy keeps the ego static, check whether it was
-trained with the full comfort profile. The static policy usually outputs a
-low/no-throttle discrete action for the whole episode and obtains low negative
-reward with almost zero route completion.
 
 ### Training Commands
 
