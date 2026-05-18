@@ -210,12 +210,13 @@ python rl/train_metadrive_sb3.py --protocol matched_stock_mixed_respawn --algo p
 python rl/train_metadrive_sb3.py --protocol matched_social_risk_mixed_respawn --algo ppo --steps 2000000 --n-envs 4 --reward-profile risk_only --run-name matched_social_risk_mixed_respawn_ppo_2m
 ```
 
-CUDA is optional and should be added only when the local PyTorch installation is
-CUDA-enabled:
+CUDA is optional:
 
 ```powershell
 python rl/train_metadrive_sb3.py --protocol matched_social_risk_intersection_respawn --algo ppo --steps 1000000 --n-envs 4 --reward-profile risk_only --run-name matched_social_risk_intersection_respawn_ppo_1m_cuda --device cuda
 ```
+
+![PPO_examples](assests/ppo_trial.gif)
 
 #### DQN Baselines
 
