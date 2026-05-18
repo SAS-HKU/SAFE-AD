@@ -1,5 +1,5 @@
 
-## Risk-Informed Physics-Based Policy Learning for Externality-Aware Autonomous Driving
+# Risk-Informed Physics-Based Policy Learning for Externality-Aware Autonomous Driving
 
 ### This repo is for HKU IDS RPG programme DATA8007 Project Submission
 
@@ -121,7 +121,7 @@ Comparing the Social-friendly and risk-aware RL agent with the baseline RL and I
 
 ### MetaDrive Training Commands
 
-#### Algorithm Compatibility
+### Algorithm Compatibility
 
 | Algorithm | SB3 action space | Use these protocols |
 |---|---|---|
@@ -135,46 +135,84 @@ Stock protocols use MetaDrive's default observation and reward. Social-risk
 protocols append the 8-D DRIFT risk feature vector, apply risk/comfort reward
 shaping, and compute risk exposure metrics.
 
+### Reward Profiles
+
+The old successful social-risk checkpoint used the stable risk-only shaping:
+
+```text
+r_t = r_t^MD - lambda_R R_t(0,0)
+```
+
+Use this as the main training profile first:
+
+```powershell
+--reward-profile risk_only
+```
+
+Comfort-aware training is an ablation after the moving policy is working:
+
+```powershell
+--reward-profile comfort_light
+--reward-profile risk_comfort
+```
+
+If a social-risk specialist policy keeps the ego static, check whether it was
+trained with the full comfort profile. The static policy usually outputs a
+low/no-throttle discrete action for the whole episode and obtains low negative
+reward with almost zero route completion.
+
+### Training Commands
+
+### Official MetaDrive Notebook Reference
+
+This reproduces the tutorial-style PPO sanity check. It is not the main fair
+benchmark.
+
+```powershell
+python rl/train_metadrive_stock.py
+```
+
 #### PPO Specialist Runs With Moving Traffic
+
 Straight:
 
 ```powershell
 python rl/train_metadrive_sb3.py --protocol matched_stock_straight_respawn --algo ppo --steps 1000000 --n-envs 4 --run-name matched_stock_straight_respawn_ppo_1m
-python rl/train_metadrive_sb3.py --protocol matched_social_risk_straight_respawn --algo ppo --steps 1000000 --n-envs 4 --run-name matched_social_risk_straight_respawn_ppo_1m
+python rl/train_metadrive_sb3.py --protocol matched_social_risk_straight_respawn --algo ppo --steps 1000000 --n-envs 4 --reward-profile risk_only --run-name matched_social_risk_straight_respawn_ppo_1m
 ```
 
 Intersection:
 
 ```powershell
 python rl/train_metadrive_sb3.py --protocol matched_stock_intersection_respawn --algo ppo --steps 1000000 --n-envs 4 --run-name matched_stock_intersection_respawn_ppo_1m
-python rl/train_metadrive_sb3.py --protocol matched_social_risk_intersection_respawn --algo ppo --steps 1000000 --n-envs 4 --run-name matched_social_risk_intersection_respawn_ppo_1m
+python rl/train_metadrive_sb3.py --protocol matched_social_risk_intersection_respawn --algo ppo --steps 1000000 --n-envs 4 --reward-profile risk_only --run-name matched_social_risk_intersection_respawn_ppo_1m
 ```
 
 Merge, roundabout, and curve follow the same naming pattern:
 
 ```powershell
 python rl/train_metadrive_sb3.py --protocol matched_stock_merge_respawn --algo ppo --steps 1000000 --n-envs 4 --run-name matched_stock_merge_respawn_ppo_1m
-python rl/train_metadrive_sb3.py --protocol matched_social_risk_merge_respawn --algo ppo --steps 1000000 --n-envs 4 --run-name matched_social_risk_merge_respawn_ppo_1m
+python rl/train_metadrive_sb3.py --protocol matched_social_risk_merge_respawn --algo ppo --steps 1000000 --n-envs 4 --reward-profile risk_only --run-name matched_social_risk_merge_respawn_ppo_1m
 
 python rl/train_metadrive_sb3.py --protocol matched_stock_roundabout_respawn --algo ppo --steps 1000000 --n-envs 4 --run-name matched_stock_roundabout_respawn_ppo_1m
-python rl/train_metadrive_sb3.py --protocol matched_social_risk_roundabout_respawn --algo ppo --steps 1000000 --n-envs 4 --run-name matched_social_risk_roundabout_respawn_ppo_1m
+python rl/train_metadrive_sb3.py --protocol matched_social_risk_roundabout_respawn --algo ppo --steps 1000000 --n-envs 4 --reward-profile risk_only --run-name matched_social_risk_roundabout_respawn_ppo_1m
 
 python rl/train_metadrive_sb3.py --protocol matched_stock_curve_respawn --algo ppo --steps 1000000 --n-envs 4 --run-name matched_stock_curve_respawn_ppo_1m
-python rl/train_metadrive_sb3.py --protocol matched_social_risk_curve_respawn --algo ppo --steps 1000000 --n-envs 4 --run-name matched_social_risk_curve_respawn_ppo_1m
+python rl/train_metadrive_sb3.py --protocol matched_social_risk_curve_respawn --algo ppo --steps 1000000 --n-envs 4 --reward-profile risk_only --run-name matched_social_risk_curve_respawn_ppo_1m
 ```
 
 Mixed-map generalization:
 
 ```powershell
 python rl/train_metadrive_sb3.py --protocol matched_stock_mixed_respawn --algo ppo --steps 2000000 --n-envs 4 --run-name matched_stock_mixed_respawn_ppo_2m
-python rl/train_metadrive_sb3.py --protocol matched_social_risk_mixed_respawn --algo ppo --steps 2000000 --n-envs 4 --run-name matched_social_risk_mixed_respawn_ppo_2m
+python rl/train_metadrive_sb3.py --protocol matched_social_risk_mixed_respawn --algo ppo --steps 2000000 --n-envs 4 --reward-profile risk_only --run-name matched_social_risk_mixed_respawn_ppo_2m
 ```
 
 CUDA is optional and should be added only when the local PyTorch installation is
 CUDA-enabled:
 
 ```powershell
-python rl/train_metadrive_sb3.py --protocol matched_social_risk_intersection_respawn --algo ppo --steps 1000000 --n-envs 4 --run-name matched_social_risk_intersection_respawn_ppo_1m_cuda --device cuda
+python rl/train_metadrive_sb3.py --protocol matched_social_risk_intersection_respawn --algo ppo --steps 1000000 --n-envs 4 --reward-profile risk_only --run-name matched_social_risk_intersection_respawn_ppo_1m_cuda --device cuda
 ```
 
 #### DQN Baselines
@@ -183,7 +221,7 @@ DQN uses the same discrete protocols as PPO:
 
 ```powershell
 python rl/train_metadrive_sb3.py --protocol matched_stock_intersection_respawn --algo dqn --steps 1000000 --n-envs 4 --run-name matched_stock_intersection_respawn_dqn_1m
-python rl/train_metadrive_sb3.py --protocol matched_social_risk_intersection_respawn --algo dqn --steps 1000000 --n-envs 4 --run-name matched_social_risk_intersection_respawn_dqn_1m
+python rl/train_metadrive_sb3.py --protocol matched_social_risk_intersection_respawn --algo dqn --steps 1000000 --n-envs 4 --reward-profile risk_only --run-name matched_social_risk_intersection_respawn_dqn_1m
 ```
 
 #### SAC, TD3, and DDPG Baselines
@@ -248,6 +286,16 @@ python rl/watch_metadrive_agent.py --planner rl --algo ppo `
   --protocol matched_social_risk_intersection_respawn `
   --checkpoint rl/checkpoints/metadrive/matched_social_risk_intersection_respawn_ppo_1m/final.zip `
   --view 3d --episodes 3 --seed 10000 --density 0.3
+```
+
+Debug a suspected static policy:
+
+```powershell
+python rl/watch_metadrive_agent.py --planner rl --algo ppo `
+  --protocol matched_social_risk_intersection `
+  --checkpoint rl/checkpoints/metadrive/matched_social_risk_intersection_ppo_1m/final.zip `
+  --view none --episodes 1 --seed 10000 --density 0.3 `
+  --debug-actions --debug-obs-tail --no-realtime --max-steps 50
 ```
 
 Top-down viewer:
