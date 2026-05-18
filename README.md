@@ -84,37 +84,6 @@ python highway\_test.py \\
 
 [leveLXData](https://levelxdata.com/)
 
-### Example statistical results:
-The following table includes the performance between the standard PPO and baseline IDM/MOBIL model:
-
-| metric | better | stock-ppo | IDM/MOBIL |
-|---|---|---|---|
-| Return | higher | 9.417 | 6.667 |
-| Collision Rate | lower | 0.000 | 1.000 |
-| TTC Min | higher | 0.622 | 0.000 |
-| Criticality Rate | lower | 0.273 | 0.778 |
-| Min Spacing | higher | 3.517 | 0.000 |
-| Mean Speed | higher | 1.459 | 2.218 |
-| Mean |Jerk| | lower | 0.513 | 2.529 |
-| Final Progress | higher | 16.893 | 18.291 |
-| Imposed Risk Potential | lower | 52.420 | 50.544 |
-| Backward Risk Flux | lower | 0.000 | 0.000 |
-| Interaction Density | lower | 0.418 | 0.511 |
-| Mean Risk per Vehicle | lower | 0.020 | 0.077 |
-| Backward Flux Ratio | lower | 0.180 | 0.279 |
-| Frame Mean Speed | higher | 11.936 | 12.540 |
-| Frame Speed Variance | lower | 24.828 | 13.549 |
-| Frame Total Progress Rate | higher | 59.680 | 62.700 |
-| Efficiency Index (EI) | higher | 0.738 | 0.847 |
-| Safety-Efficiency Index (SEI) | higher | 0.738 | 0.764 |
-| Social Traffic Efficiency Index | higher | 9.409 | 11.095 |
-| Shockwave Onset Rate | lower | 0.182 | 0.111 |
-| Frame Min TTC | higher | nan | 0.601 |
-| Frame Frac TTC < 1.5s | lower | 0.000 | 0.111 |
-| Frame Max DRAC | lower | 0.000 | 0.924 |
-| Safety Score | higher | 0.810 | 0.301 |
-| Courtesy Score | higher | 1.000 | 1.000 |
-| Social-Friendliness Score | higher | 0.608 | 0.421 |
 
 ### Example snapshots of agent performances
 Comparing the Social-friendly and risk-aware RL agent with the baseline RL and IDM/MOBIL in roundabout scenario: The IDM/MOBIL leads to a collision, while the baseline RL agent leads to over-conservative behavior
