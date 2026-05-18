@@ -224,7 +224,7 @@ python rl/eval_metadrive.py --run-name eval_trigger_checkpoint_respawn_stress `
   --planners "risk_ppo@matched_social_risk_intersection:rl/checkpoints/metadrive/matched_social_risk_intersection_ppo_1m/final.zip,idm@matched_stock_intersection"
 ```
 
-#### 3D and Top-Down Watching
+#### Visualizations
 
 3D Panda3D view:
 
@@ -233,16 +233,6 @@ python rl/watch_metadrive_agent.py --planner rl --algo ppo `
   --protocol matched_social_risk_intersection_respawn `
   --checkpoint rl/checkpoints/metadrive/matched_social_risk_intersection_respawn_ppo_1m/final.zip `
   --view 3d --episodes 3 --seed 10000 --density 0.3
-```
-
-Debug a suspected static policy:
-
-```powershell
-python rl/watch_metadrive_agent.py --planner rl --algo ppo `
-  --protocol matched_social_risk_intersection `
-  --checkpoint rl/checkpoints/metadrive/matched_social_risk_intersection_ppo_1m/final.zip `
-  --view none --episodes 1 --seed 10000 --density 0.3 `
-  --debug-actions --debug-obs-tail --no-realtime --max-steps 50
 ```
 
 Top-down viewer:
