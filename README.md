@@ -258,6 +258,8 @@ python rl/watch_metadrive_agent.py --planner rl --algo ppo `
   --checkpoint rl/checkpoints/metadrive/matched_social_risk_intersection_respawn_ppo_1m/final.zip `
   --view top_down --episodes 3 --seed 10000 --density 0.3
 ```
+#### Example simulation of our proposed PPO agent in curvy highway scenarios:
+![PPO_examples](assests/social_risk_ppo_intersection.gif)
 
 
 #### BEV Risk-Field Overlay
