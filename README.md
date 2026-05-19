@@ -192,8 +192,9 @@ python rl/train_metadrive_sb3.py --protocol matched_stock_intersection_respawn_c
 python rl/train_metadrive_sb3.py --protocol matched_social_risk_intersection_respawn_continuous --algo ddpg --steps 1000000 --n-envs 4 --run-name matched_social_risk_intersection_respawn_ddpg_1m
 ```
 
-#### Example simulation of the training trial and error for baseline TD3 agent in unsignalized intersection scenarios (with some randomly initialized traffic):
+#### Example simulation of the training trial and error for baseline TD3, DDPG agent in unsignalized intersection scenarios (with some randomly initialized traffic):
 ![TD3_examples](assests/stock_td3_intersection.gif)
+![TD3_examples](assests/stock_ddpg_intersection.gif)
 
 #### Evaluation Commands
 
