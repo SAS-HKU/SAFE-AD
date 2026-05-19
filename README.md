@@ -1,9 +1,7 @@
 
 # Risk-Informed Physics-Based Policy Learning for Externality-Aware Autonomous Driving
 
-### This repo is for HKU IDS RPG programme DATA8007 Project Submission
-
-Relevant preliminmary model used could be found at [DRIFT](https://github.com/PeterWANGHK/DRIFT.git)
+Preliminmary model for PDE-governed risk field propagation modeling used could be found at [DRIFT](https://github.com/PeterWANGHK/DRIFT.git)
 
 ![Methodology graph](assests/methodology_8007.jpg)
 
