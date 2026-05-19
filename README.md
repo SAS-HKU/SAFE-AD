@@ -196,6 +196,13 @@ python rl/train_metadrive_sb3.py --protocol matched_social_risk_intersection_res
 ![TD3_examples](assests/stock_td3_intersection.gif)
 ![TD3_examples](assests/stock_ddpg_intersection.gif)
 
+Some questions could be found from the baseline RL agent: 
+- high steering magnitude;
+- high steering-change rate;
+- high throttle-change rate;
+- high jerk;
+- and poor route completion due to collision
+
 #### Evaluation Commands
 
 Planner specs use:
