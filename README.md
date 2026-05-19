@@ -1,6 +1,8 @@
 
 # Risk-Informed Physics-Based Policy Learning for Externality-Aware Autonomous Driving
 
+A physics-informed propagated risk field can serve as a structured intermediate representation that improves RL tactical planning by making safety, progress, and externality measurable and learnable.
+
 Preliminmary model for PDE-governed risk field propagation modeling used could be found at [DRIFT](https://github.com/PeterWANGHK/DRIFT.git)
 
 ![Methodology graph](assests/methodology_8007.jpg)
