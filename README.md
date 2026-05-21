@@ -264,7 +264,7 @@ python rl/watch_metadrive_agent.py --planner rl --algo ppo `
 #### Example simulation of our proposed PPO agent in curvy highway scenarios:
 ![PPO_examples](assests/social_risk_ppo_intersection.gif)
 
-#### Example simulation of our proposed PPO agent in roundabout scenarios:
+#### Example simulation of DDPG agent in roundabout scenarios:
 ![DDPG_examples](assests/ddpg_roundabout.gif)
 
 
