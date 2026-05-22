@@ -270,13 +270,12 @@ python rl/watch_metadrive_agent.py --planner rl --algo ppo `
 
 #### BEV Risk-Field Overlay
 
-Side-by-side top-down risk overlay:
 
 ```powershell
-python rl/visualize_metadrive_comparison.py `
-  --planners "stock_ppo@matched_stock_intersection_respawn:rl/checkpoints/metadrive/matched_stock_intersection_respawn_ppo_1m/final.zip,risk_ppo@matched_social_risk_intersection_respawn:rl/checkpoints/metadrive/matched_social_risk_intersection_respawn_ppo_1m/final.zip,idm@matched_stock_intersection_respawn" `
-  --seed 10000 --density 0.3 --max-steps 200 --step-stride 20 `
-  --out rl/logs/metadrive/viz/intersection_respawn_overlay.png
+python rl/watch_metadrive_agent.py --planner rl `
+--protocol matched_stock_merge_respawn `
+--checkpoint rl/checkpoints/metadrive/matched_stock_merge_respawn_ppo_1m/final.zip `
+--view top_down --risk-overlay drift --episodes 3 --seed 10000 --density 0.3
 ```
 
 #### Training Reward/Return Plots
