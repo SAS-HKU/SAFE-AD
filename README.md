@@ -6,7 +6,7 @@ Unlike prior risk-aware RL methods that use instantaneous scalar risk penalties,
 
 Preliminmary model for PDE-governed risk field propagation modeling used could be found at [DRIFT](https://github.com/PeterWANGHK/DRIFT.git)
 
-![Methodology graph](assests/methodology_8007.jpg)
+![Methodology graph](assests/methodology_v12.png)
 
 - Problem: socially friendly autonomous driving needs safety, progress, and low externality.
 - Gap: risk-aware RL often uses scalar or instantaneous risk and lacks physically grounded risk propagation.
