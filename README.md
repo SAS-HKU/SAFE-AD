@@ -11,7 +11,7 @@ The central idea is to use a **physics-informed propagated risk field** as a str
 
 The preliminary PDE-governed risk-field model is based on [DRIFT](https://github.com/PeterWANGHK/DRIFT.git).
 
-![Methodology graph](assests/methodology_v12.png)
+![Methodology graph](assests/SAFE-AD-v1.png)
 
 ## Project Status
 
