@@ -1,4 +1,5 @@
 # SAFE-AD: Socially-Aware Field-Enhanced Reinforcement Learning for Autonomous Driving
+Zian Wang, Wenjie Huang, Zejian Deng, Yong Wang, Jiahui Xu, Yiming Shu, Shen Li, Dongpu Cao, Chen Sun✉
 
 ![Code Status](https://img.shields.io/badge/code-partial_release-orange)
 ![Demos](https://img.shields.io/badge/demonstrations-ready-brightgreen)
