@@ -1,0 +1,334 @@
+{
+  "schema_version": "social_reward_v1",
+  "description": "Stock-HighwayEnv SB3 reward calibrated from dataset-derived social features.",
+  "ttc_safe": 3.0,
+  "thw_des": 1.8,
+  "drac_comfort": 2.0,
+  "drac_max": 6.0,
+  "courtesy_decel": 2.0,
+  "hard_brake": 3.0,
+  "missed_opportunity_adv": 0.6,
+  "bad_lane_change_adv": -0.3,
+  "risk_gate_r0": 1.5,
+  "risk_clip": 5.0,
+  "lane_adv_gap_d0": 30.0,
+  "lane_adv_dv_v0": 5.0,
+  "lane_adv_risk_r0": 2.0,
+  "blocked_gap_thr": 25.0,
+  "blocked_speed_frac": 0.7,
+  "progress_ref_speed": 25.0,
+  "comfort_accel_norm": 4.0,
+  "comfort_steer_norm": 0.35,
+  "comfort_jerk_norm": 5.0,
+  "flux_b0": 1.0,
+  "w_p": 0.3,
+  "w_v": 0.2,
+  "w_adv": 1.0,
+  "w_bad": 1.5,
+  "w_miss": 0.8,
+  "w_ttc": 2.0,
+  "w_thw": 0.5,
+  "w_drac": 1.0,
+  "w_soc": 1.0,
+  "w_c": 0.2,
+  "w_R": 0.5,
+  "w_B": 0.05,
+  "calibration": {
+    "inputs": [
+      "rl\\checkpoints\\bc_highD.npz"
+    ],
+    "dataset_count": 1,
+    "dataset_summaries": [
+      {
+        "path": "rl\\checkpoints\\bc_highD.npz",
+        "summary": {
+          "n": 237910,
+          "n_tracks": 858,
+          "n_scenes": 1,
+          "per_scene": {
+            "1": 237910
+          },
+          "schema_version": 6,
+          "horizon_sec": 1.5,
+          "outcome_horizon_sec": 3.0,
+          "action_hist": [
+            212326,
+            11359,
+            9570,
+            2322,
+            162,
+            80,
+            1743,
+            59,
+            289
+          ],
+          "lane_keep_frac": 0.9804337774788786,
+          "lane_change_frac": 0.019566222521121432,
+          "lc_advantage_frac_all": 0.09194233113362196,
+          "lc_advantage_frac_lc": 0.07024704618689581,
+          "lc_success_frac_lc": 0.8270676691729323,
+          "blocked_frac": 0.0,
+          "escape_given_blocked": NaN,
+          "near_miss_frac": 0.3498928166113236
+        },
+        "social_summary": {
+          "rear_decel_peak_3s": {
+            "mean": -0.17063126106375592,
+            "std": 0.44126672279692075,
+            "p10": -0.5899999499320984,
+            "p50": -0.0901055783033371,
+            "p90": 0.2501167953014374
+          },
+          "rear_ttc_delta": {
+            "mean": -1.3543429403932594,
+            "std": 526.1172214544417,
+            "p10": -104.91190719604492,
+            "p50": -2.267306923866272,
+            "p90": 103.81922912597656
+          },
+          "rear_thw_delta": {
+            "mean": 0.04177814487695559,
+            "std": 0.25023993831744473,
+            "p10": -0.14138068109750745,
+            "p50": 0.004876477876678109,
+            "p90": 0.21714843958616287
+          },
+          "hard_brake_imposed_flag": {
+            "mean": 0.0,
+            "std": 0.0,
+            "p10": 0.0,
+            "p50": 0.0,
+            "p90": 0.0
+          },
+          "bad_cut_in_flag": {
+            "mean": 0.058757513345382706,
+            "std": 0.23517029568134212,
+            "p10": 0.0,
+            "p50": 0.0,
+            "p90": 0.0
+          },
+          "missed_opportunity_flag": {
+            "mean": 0.0,
+            "std": 0.0,
+            "p10": 0.0,
+            "p50": 0.0,
+            "p90": 0.0
+          },
+          "bad_lane_change_flag": {
+            "mean": 0.0005506283888865538,
+            "std": 0.023459011003533512,
+            "p10": 0.0,
+            "p50": 0.0,
+            "p90": 0.0
+          },
+          "risk_mass_total": {
+            "mean": 288.36152618894704,
+            "std": 262.56344731584625,
+            "p10": 0.4392476201057436,
+            "p50": 225.47921752929688,
+            "p90": 675.7691467285158
+          },
+          "risk_mass_others": {
+            "mean": 200.4240462324519,
+            "std": 217.756605163798,
+            "p10": 0.01680196300148964,
+            "p50": 136.05608367919922,
+            "p90": 508.0889923095703
+          },
+          "risk_gradient_peak": {
+            "mean": 0.17972168939677033,
+            "std": 0.09621375994535578,
+            "p10": 0.0042575885076075876,
+            "p50": 0.20378224551677704,
+            "p90": 0.2975505977869034
+          },
+          "risk_flux_backward": {
+            "mean": 11.437339432685247,
+            "std": 76.2621461625742,
+            "p10": 0.0,
+            "p50": 0.0,
+            "p90": 0.623673337697983
+          },
+          "risk_field_entropy": {
+            "mean": 5.52897368576762,
+            "std": 1.3155857454663138,
+            "p10": 4.289698553085327,
+            "p50": 5.9094884395599365,
+            "p90": 6.521082925796509
+          },
+          "safety_score": {
+            "mean": 0.6378671412459919,
+            "std": 0.359749213653695,
+            "p10": 0.03277809545397764,
+            "p50": 0.7010444402694702,
+            "p90": 1.0
+          },
+          "progress_score": {
+            "mean": 0.06062970921242152,
+            "std": 0.10014545932119963,
+            "p10": 0.0,
+            "p50": 0.006055694306269288,
+            "p90": 0.1959999218583107
+          },
+          "courtesy_score": {
+            "mean": 0.9061111563830689,
+            "std": 0.26667175293126505,
+            "p10": 0.8300058245658875,
+            "p50": 1.0,
+            "p90": 1.0
+          },
+          "social_friendliness_score": {
+            "mean": 0.5451140524862317,
+            "std": 0.16404568108759926,
+            "p10": 0.3197795212268829,
+            "p50": 0.5476213693618774,
+            "p90": 0.7174041271209717
+          },
+          "social_class": {
+            "mean": 2.3896053129334622,
+            "std": 1.4944759700972505,
+            "p10": 1.0,
+            "p50": 1.0,
+            "p90": 4.0
+          }
+        }
+      }
+    ],
+    "combined_social_summary": {
+      "rear_decel_peak_3s": {
+        "mean": -0.17063126106375592,
+        "std": 0.44126672279692075,
+        "p10": -0.5899999499320984,
+        "p50": -0.0901055783033371,
+        "p90": 0.2501167953014374
+      },
+      "rear_ttc_delta": {
+        "mean": -1.3543429403932594,
+        "std": 526.1172214544417,
+        "p10": -104.91190719604492,
+        "p50": -2.267306923866272,
+        "p90": 103.81922912597656
+      },
+      "rear_thw_delta": {
+        "mean": 0.04177814487695559,
+        "std": 0.25023993831744473,
+        "p10": -0.14138068109750745,
+        "p50": 0.004876477876678109,
+        "p90": 0.21714843958616287
+      },
+      "hard_brake_imposed_flag": {
+        "mean": 0.0,
+        "std": 0.0,
+        "p10": 0.0,
+        "p50": 0.0,
+        "p90": 0.0
+      },
+      "bad_cut_in_flag": {
+        "mean": 0.058757513345382706,
+        "std": 0.23517029568134212,
+        "p10": 0.0,
+        "p50": 0.0,
+        "p90": 0.0
+      },
+      "missed_opportunity_flag": {
+        "mean": 0.0,
+        "std": 0.0,
+        "p10": 0.0,
+        "p50": 0.0,
+        "p90": 0.0
+      },
+      "bad_lane_change_flag": {
+        "mean": 0.0005506283888865538,
+        "std": 0.023459011003533512,
+        "p10": 0.0,
+        "p50": 0.0,
+        "p90": 0.0
+      },
+      "risk_mass_total": {
+        "mean": 288.36152618894704,
+        "std": 262.56344731584625,
+        "p10": 0.4392476201057436,
+        "p50": 225.47921752929688,
+        "p90": 675.7691467285158
+      },
+      "risk_mass_others": {
+        "mean": 200.4240462324519,
+        "std": 217.756605163798,
+        "p10": 0.01680196300148964,
+        "p50": 136.05608367919922,
+        "p90": 508.0889923095703
+      },
+      "risk_gradient_peak": {
+        "mean": 0.17972168939677033,
+        "std": 0.09621375994535578,
+        "p10": 0.0042575885076075876,
+        "p50": 0.20378224551677704,
+        "p90": 0.2975505977869034
+      },
+      "risk_flux_backward": {
+        "mean": 11.437339432685247,
+        "std": 76.2621461625742,
+        "p10": 0.0,
+        "p50": 0.0,
+        "p90": 0.623673337697983
+      },
+      "risk_field_entropy": {
+        "mean": 5.52897368576762,
+        "std": 1.3155857454663138,
+        "p10": 4.289698553085327,
+        "p50": 5.9094884395599365,
+        "p90": 6.521082925796509
+      },
+      "safety_score": {
+        "mean": 0.6378671412459919,
+        "std": 0.359749213653695,
+        "p10": 0.03277809545397764,
+        "p50": 0.7010444402694702,
+        "p90": 1.0
+      },
+      "progress_score": {
+        "mean": 0.06062970921242152,
+        "std": 0.10014545932119963,
+        "p10": 0.0,
+        "p50": 0.006055694306269288,
+        "p90": 0.1959999218583107
+      },
+      "courtesy_score": {
+        "mean": 0.9061111563830689,
+        "std": 0.26667175293126505,
+        "p10": 0.8300058245658875,
+        "p50": 1.0,
+        "p90": 1.0
+      },
+      "social_friendliness_score": {
+        "mean": 0.5451140524862317,
+        "std": 0.16404568108759926,
+        "p10": 0.3197795212268829,
+        "p50": 0.5476213693618774,
+        "p90": 0.7174041271209717
+      },
+      "social_class": {
+        "mean": 2.3896053129334622,
+        "std": 1.4944759700972505,
+        "p10": 1.0,
+        "p50": 1.0,
+        "p90": 4.0
+      }
+    }
+  },
+  "term_descriptions": {
+    "r_prog_safe": "Forward progress gated by corridor risk.",
+    "r_speed": "Cruise-speed tracking reward.",
+    "r_lane_adv": "Reward for moving to a tactically better lane.",
+    "c_bad_lane": "Penalty for changing into a worse lane.",
+    "c_missed": "Penalty for staying blocked when a better lane exists.",
+    "c_ttc": "Dense safety penalty from minimum TTC.",
+    "c_thw": "Dense car-following headway penalty.",
+    "c_drac": "Required-braking penalty.",
+    "c_social": "Courtesy penalty from imposed follower braking / bad cut-ins.",
+    "c_comfort": "Comfort penalty from acceleration, steering, and jerk.",
+    "c_field": "Bounded corridor-risk penalty from DRIFT.",
+    "c_flux_weak": "Weak backward risk-flux regularizer.",
+    "stock_reward": "Original HighwayEnv reward before social shaping."
+  }
+}

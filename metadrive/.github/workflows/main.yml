@@ -1,0 +1,394 @@
+# This workflow will install Python dependencies, run tests and lint with a single version of Python
+# For more information see: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
+
+name: test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  code_style:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.9 / 3.12
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Check code style
+        run: |
+          pip install "yapf==0.30.0"
+          bash format.sh --test
+
+  scenarionet_test:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repository Dispatch
+        uses: peter-evans/repository-dispatch@v1
+        with:
+          token: ${{ secrets.APP_REPO_TOKEN }}
+          repository: metadriverse/scenarionet
+          event-type: metadrive-update
+
+  docstring_coverage:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.9 / 3.12
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install software
+        run: |
+          sudo apt update && sudo apt install -y bc
+          pip install "docstr-coverage"
+      - name: Get post-PR docstring coverage
+        run: |
+          after=$(docstr-coverage --percentage-only --fail-under 0 metadrive/)
+          echo "after=$after" >> "$GITHUB_ENV"
+      - name: Checkout the main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Get pre-PR docstring coverage
+        run: |
+          before=$(docstr-coverage --percentage-only --fail-under 0 metadrive/)
+          echo "before=$before" >> "$GITHUB_ENV"
+      - name: Check if docstring coverage decreases
+        run: |
+          printf 'Docstring coverage before pull request: %s%%\n' "$before"
+          printf 'Docstring coverage after pull request: %s%%\n' "$after"
+          improvement=$(echo "$after - $before" | bc -l)
+          if (( $(echo "$after < $before" |bc -l) )); then
+            printf 'Docstring coverage check failed! We require the docstring coverage to be non-decreasing after PR. You have decreased the coverage by: %s%%\n' "$improvement"
+            exit 1
+          fi
+          printf 'Docstring coverage check successful! We require the docstring coverage to be non-decreasing after PR. You have changed the coverage by: %s%%\n' "$improvement"
+
+  test_functionality:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.9 / 3.12
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Blackbox tests
+        run: |
+          pip install cython
+          pip install numpy
+          pip install -e .
+          python -m metadrive.pull_asset
+          pip install pytest
+          pip install pytest-cov
+          
+          cd metadrive/
+          pytest --cov=./ --cov-config=.coveragerc --cov-report=xml -sv tests/test_functionality
+
+  test_environment:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.9 / 3.12
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Blackbox tests
+        run: |
+          pip install cython
+          pip install numpy
+          pip install gym
+          pip install -e .
+          python -m metadrive.pull_asset
+          pip install pytest
+          pip install pytest-cov
+          
+          cd metadrive/
+          pytest --cov=./ --cov-config=.coveragerc --cov-report=xml -sv tests/test_env
+
+  test_policy:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.9 / 3.12
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Blackbox tests
+        run: |
+          pip install cython
+          pip install numpy
+          pip install -e .
+          python -m metadrive.pull_asset
+          pip install pytest
+          pip install pytest-cov
+          
+          cd metadrive/
+          pytest --cov=./ --cov-config=.coveragerc --cov-report=xml -sv tests/test_policy
+
+  test_component:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.9 / 3.12
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Blackbox tests
+        run: |
+          pip install cython
+          pip install numpy
+          pip install -e .
+          python -m metadrive.pull_asset
+          pip install pytest
+          pip install pytest-cov
+          
+          cd metadrive/
+          pytest --cov=./ --cov-config=.coveragerc --cov-report=xml -sv tests/test_component
+
+  test_export_record_scenario:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.9 / 3.12
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Blackbox tests
+        run: |
+          pip install cython
+          pip install numpy
+          pip install -e .
+          python -m metadrive.pull_asset
+          pip install pytest
+          pip install pytest-cov
+          
+          cd metadrive/
+          pytest --cov=./ --cov-config=.coveragerc --cov-report=xml -sv tests/test_export_record_scenario
+
+  test_sensor_pipeline:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.9 / 3.12
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Prepare OpenGL
+        run: |
+          sudo apt-get -y install xvfb
+          sudo /usr/bin/Xvfb :0 -screen 0 1280x1024x24 &
+      - name: Blackbox tests
+        run: |
+          pip install cython
+          pip install numpy
+          pip install -e .
+          python -m metadrive.pull_asset
+          pip install pytest
+          pip install pytest-cov
+          
+          cd metadrive/
+          pytest --cov=./ --cov-config=.coveragerc --cov-report=xml -sv tests/test_sensors/
+
+  test_examples:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.9 / 3.12
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Prepare OpenGL
+        run: |
+          sudo apt-get -y install xvfb
+          sudo /usr/bin/Xvfb :0 -screen 0 1280x1024x24 &
+      - name: Blackbox tests
+        run: |
+          pip install cython
+          pip install numpy
+          pip install mediapy
+          conda install ffmpeg
+          pip install -e .
+          python -m metadrive.pull_asset
+          pip install pytest
+          pip install pytest-cov
+          
+          cd metadrive/
+          pytest --cov=./ --cov-config=.coveragerc --cov-report=xml -sv tests/test_examples
+
+  test_policy_windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.9 / 3.12
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Blackbox tests
+        run: |
+          pip install cython
+          pip install numpy
+          pip install -e .
+          python -m metadrive.pull_asset
+          pip install pytest
+          pip install pytest-cov
+          
+          cd metadrive/
+          pytest --cov=./ --cov-config=.coveragerc --cov-report=xml -sv tests/test_policy
+
+  test_ipynb:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.9 / 3.12
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Prepare OpenGL
+        run: |
+          sudo apt-get -y install xvfb
+          sudo /usr/bin/Xvfb :0 -screen 0 1280x1024x24 &
+      - name: Blackbox tests
+        run: |
+          pip install cython
+          pip install numpy
+          pip install -e .
+          python -m metadrive.pull_asset
+          pip install pytest
+          pip install pytest-cov
+          
+          cd metadrive/
+          pip install nbmake pytest-xdist
+          mkdir ./tests/test_ipynb
+          cp ./examples/Basic_MetaDrive_Usages.ipynb ./tests/test_ipynb/
+          TEST_IPYNB=1 pytest --nbmake -n=auto ./tests/test_ipynb/
+
+  test_doc_code:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.9 / 3.12
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Prepare OpenGL
+        run: |
+          sudo apt-get -y install xvfb
+          sudo /usr/bin/Xvfb :0 -screen 0 1280x1024x24 &
+      - name: Setup FFmpeg
+        uses: FedericoCarboni/setup-ffmpeg@v3
+        id: setup-ffmpeg
+        with:
+          # A specific version to download, may also be "release" or a specific version
+          # like "6.1.0". At the moment semver specifiers (i.e. >=6.1.0) are supported
+          # only on Windows, on other platforms they are allowed but version is matched
+          # exactly regardless.
+          ffmpeg-version: release
+          # Target architecture of the ffmpeg executable to install. Defaults to the
+          # system architecture. Only x64 and arm64 are supported (arm64 only on Linux).
+          architecture: ''
+          # As of version 3 of this action, builds are no longer downloaded from GitHub
+          # except on Windows: https://github.com/GyanD/codexffmpeg/releases.
+          github-token: ${{ github.server_url == 'https://github.com' && github.token || '' }}
+      - name: Blackbox tests
+        run: |
+          pip install cython
+          pip install numpy
+          pip install mediapy
+          conda install ffmpeg
+          pip install -e .
+          pip install -e .[gym]
+          python -m metadrive.pull_asset
+          pip install pytest
+          pip install pytest-cov
+          cd documentation
+          pip install nbmake pytest-xdist
+          TEST_DOC=1 pytest --nbmake -n=auto ./source
+
+  test_ros:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Set up ROS2 humble
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: humble
+      - name: checkout code
+        uses: actions/checkout@v2
+      - name: Blackbox tests
+        run: |
+          
+          ls -al
+          pwd
+          source /opt/ros/humble/setup.bash
+          
+          sudo rosdep update
+          
+          pwd
+          
+          pip install pyzmq
+          pip install gymnasium==0.28
+          ls -al
+          pip install -e .
+          pip install numpy==1.24
+          python -m metadrive.pull_asset
+          
+          cd bridges/ros_bridge
+          ls -al
+          python _delete_rviz_line.py
+          sudo rosdep install --from-paths src --ignore-src -y --rosdistro humble
+          pwd
+          colcon build
+          source install/setup.bash
+          pip install pyzmq
+          nohup ros2 launch metadrive_example_bridge metadrive_example_bridge.launch.py > ros.txt 2>&1 &
+          python ros_socket_server.py --test
+
+#          python ros_socket_server.py --test
+
+#      - name: Upload coverage to Codecov
+#        uses: codecov/codecov-action@v1
+#        with:
+#          file: ./metadrive/coverage.xml
+#          fail_ci_if_error: true

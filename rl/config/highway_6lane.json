@@ -1,0 +1,9 @@
+{
+  "lanes_count": 6,
+  "vehicles_count": 80,
+  "vehicles_density": 1.4,
+  "reward_speed_range": [18, 32],
+  "right_lane_reward": 0.05,
+  "high_speed_reward": 0.5,
+  "duration": 50
+}
