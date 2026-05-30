@@ -459,10 +459,8 @@ SAFE-AD/
 ├── metadrive/                      # MetaDrive fork (env configs)
 ├── HighwayEnv-master/              # HighwayEnv fork (env configs)
 ├── docs/                           # paper-figure builders + Word generators
-│   ├── ripple_rl_formulation.tex   # methodology LaTeX
-│   ├── build_*_docx.py
 │   ├── build_metadrive_training_figure.py
 │   ├── build_highway_training_figure.py
 │   └── build_metadrive_sac_return_compact.py
-└── assests/                        # demo gifs / methodology PNG (kept for README)
+└── assests/                        # demo figures and gifs
 ```
