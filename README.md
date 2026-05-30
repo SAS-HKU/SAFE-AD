@@ -14,29 +14,6 @@ The preliminary PDE-governed risk-field model is based on [DRIFT](https://github
 
 ![Methodology graph](assests/SAFE-AD-v2.jpg)
 
-## Project Status
-
-| Component | Status |
-|---|---|
-| Demonstration files | Ready |
-| Highway-env experiments | Demo-ready |
-| MetaDrive experiments | Demo-ready |
-| Full code release | In preparation |
-| Paper preprint | Coming soon |
-| Checkpoints and full logs | Partial release / in preparation |
-
-## Overview
-
-SAFE-AD evaluates field-enhanced RL in three complementary settings:
-
-| Layer | Purpose | Environment |
-|---|---|---|
-| Risk-field modeling | Validate propagated risk and PINN surrogate modeling | Naturalistic trajectory datasets and synthetic traffic scenes |
-| Controlled RL benchmark | Diagnose whether field features improve tactical behavior | highway-env |
-| High-fidelity RL benchmark | Test robustness under richer vehicle dynamics and interactive traffic | MetaDrive |
-| Safety-critical execution | Use learned RL guidance with MPC-CBF safety filtering | Synthetic merging / uncertainty scenarios |
-
-The benchmark compares stock RL, risk-aware RL, socially-aware risk RL, IDM/MOBIL, and selected SB3 baselines.
 
 ## Core Ideas
 
