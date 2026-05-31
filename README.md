@@ -102,6 +102,8 @@ Outputs are schema-v4 `.npz` files containing per-frame ego/neighbor states, lan
 
 The PINN is a differentiable surrogate of the PDE-governed propagated risk field (`pde_solver.py`). It is trained on the PDE-generated field as a teacher and on multi-dataset scenes.
 
+![PINN graph](assests/PINN_graph.png)
+
 ### Train PINN surrogate
 
 ```bash
