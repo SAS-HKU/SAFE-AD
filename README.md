@@ -21,7 +21,6 @@ The preliminary PDE-governed risk-field model is based on [DRIFT](https://github
 - **PINN surrogate**: learns a differentiable approximation of the PDE-governed risk field.
 - **Risk-aware RL**: appends field-derived risk features to the policy observation.
 - **Social-aware reward shaping**: penalizes imposed risk, backward disturbance, jerk, abrupt steering, and unsafe close interactions.
-- **MPC-CBF compatibility**: learned RL guidance can be used as a tactical layer while MPC-CBF enforces hard safety constraints.
 
 ---
 
