@@ -145,7 +145,7 @@ See [`PINN-finetune.md`](PINN-finetune.md) and [`IMPLEMENTATION_GUIDE_PINN_Impro
 ---
 ## Experiment Design
 
-![experiment](assests/SAFE-AD_experiment.png)
+![experiment](assests/SAFE-experiment.png)
 
 ## Highway-env Experiments
 
