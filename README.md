@@ -143,9 +143,7 @@ python pinn_scene_compare.py \
 See [`PINN-finetune.md`](PINN-finetune.md) and [`IMPLEMENTATION_GUIDE_PINN_Improvements.md`](IMPLEMENTATION_GUIDE_PINN_Improvements.md) for fine-tuning recipes and ablations.
 
 ---
-## Experiment Design
 
-![experiment](assests/SAFE-experiment.png)
 
 ## Highway-env Experiments
 
