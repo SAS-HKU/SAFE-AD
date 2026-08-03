@@ -1,0 +1,5 @@
+candidate,baseline,metric,paired_delta,ci_low,ci_high,n_recordings
+Prospective numerical field,Instantaneous source,auroc,0.08477271310436112,0.06265653990240837,0.1004656138711949,6
+Prospective numerical field,Instantaneous source,auprc,0.16688201480515033,0.1440174454926193,0.19191322450451595,6
+Context PINN,Instantaneous source,auroc,0.040809101251430224,0.018991951746160918,0.05764932515693321,6
+Context PINN,Instantaneous source,auprc,0.09757807232781289,0.07202433497732691,0.1207263663516938,6

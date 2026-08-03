@@ -18,7 +18,7 @@ from config import Config as cfg
 # VEHICLE UTILITIES
 # ============================================================
 
-def create_vehicle(vid, x, y, vx, vy, vclass='car'):
+def create_vehicle(vid, x, y, vx, vy, vclass='car', config=None):
     """
     Create a vehicle dictionary.
     
@@ -31,8 +31,9 @@ def create_vehicle(vid, x, y, vx, vy, vclass='car'):
     Returns:
         dict: Vehicle info
     """
-    length = cfg.truck_length if vclass == 'truck' else cfg.car_length
-    width = cfg.truck_width if vclass == 'truck' else cfg.car_width
+    c = config or cfg
+    length = c.truck_length if vclass == 'truck' else c.car_length
+    width = c.truck_width if vclass == 'truck' else c.car_width
     heading = np.arctan2(vy, vx) if (vx != 0 or vy != 0) else 0
     
     return {
@@ -46,7 +47,7 @@ def create_vehicle(vid, x, y, vx, vy, vclass='car'):
     }
 
 
-def move_vehicle(v, dt, ax=0, ay=0):
+def move_vehicle(v, dt, ax=0, ay=0, config=None):
     """
     Move vehicle forward in time with optional acceleration.
     
@@ -66,14 +67,16 @@ def move_vehicle(v, dt, ax=0, ay=0):
     new_vx = v['vx'] + ax * dt
     new_vy = v['vy'] + ay * dt
     
-    return create_vehicle(v['id'], new_x, new_y, new_vx, new_vy, v['class'])
+    return create_vehicle(
+        v['id'], new_x, new_y, new_vx, new_vy, v['class'], config=config
+    )
 
 
 # ============================================================
 # SOURCE TERM Q(x,t)
 # ============================================================
 
-def compute_Q_vehicle(vehicles, ego, X, Y):
+def compute_Q_vehicle(vehicles, ego, X, Y, config=None):
     """
     Compute vehicle-induced risk source using GVF-style Gaussian kernels.
 
@@ -89,6 +92,7 @@ def compute_Q_vehicle(vehicles, ego, X, Y):
     Returns:
         ndarray: Vehicle source field Q_veh
     """
+    c = config or cfg
     Q = np.zeros_like(X)
 
     ego_vx, ego_vy = ego['vx'], ego['vy']
@@ -152,8 +156,8 @@ def compute_Q_vehicle(vehicles, ego, X, Y):
 
         # Kernel parameters (inflate with relative speed AND braking)
         # For braking vehicles, create elongated forward wake
-        sigma_par = cfg.sigma_x * (1 + 0.05 * np.abs(rel_vx)) * sigma_brake_boost
-        sigma_perp = cfg.sigma_y
+        sigma_par = c.sigma_x * (1 + 0.05 * np.abs(rel_vx)) * sigma_brake_boost
+        sigma_perp = c.sigma_y
 
         # Gaussian kernel
         gaussian = np.exp(-0.5 * (dX_rot**2 / sigma_par**2 + dY_rot**2 / sigma_perp**2))
@@ -250,7 +254,7 @@ def compute_Q_occlusion(vehicles, ego, X, Y):
     return Q_occ, occ_mask
 
 
-def compute_Q_merge(vehicles, ego, X, Y):
+def compute_Q_merge(vehicles, ego, X, Y, config=None):
     """
     Compute merge-zone conflict source, gated by vehicle density.
 
@@ -266,16 +270,17 @@ def compute_Q_merge(vehicles, ego, X, Y):
     Returns:
         ndarray: Merge zone source field (gated by vehicle density)
     """
+    c = config or cfg
     # Merge zone geometry (base risk pattern)
-    s = np.clip((X - cfg.merge_x_start) / (cfg.merge_x_end - cfg.merge_x_start), 0, 1)
+    s = np.clip((X - c.merge_x_start) / (c.merge_x_end - c.merge_x_start), 0, 1)
     ramp = 3 * s**2 - 2 * s**3  # Smooth onset g(s)
 
     # Lateral: concentrated between ramp and mainline
-    y_center = cfg.merge_y_ramp / 2
+    y_center = c.merge_y_ramp / 2
     lateral = np.exp(-0.5 * ((Y - y_center)**2 / 16))
 
     # Gore point intensity
-    gore = np.exp(-((X - cfg.merge_x_end)**2 + (Y - 4)**2) / 100)
+    gore = np.exp(-((X - c.merge_x_end)**2 + (Y - 4)**2) / 100)
 
     Q_merge_base = 0.6 * ramp * lateral + 1.0 * gore  # INCREASED from 0.3/0.5 to 0.6/1.0
 
@@ -297,7 +302,7 @@ def compute_Q_merge(vehicles, ego, X, Y):
     return Q_merge
 
 
-def compute_total_Q(vehicles, ego, X, Y):
+def compute_total_Q(vehicles, ego, X, Y, config=None):
     """
     Compute total source term Q = Q_veh + Q_occ + Q_merge.
 
@@ -312,9 +317,9 @@ def compute_total_Q(vehicles, ego, X, Y):
         Q_occ: Occlusion source
         occ_mask: Occlusion mask
     """
-    Q_veh = compute_Q_vehicle(vehicles, ego, X, Y)
+    Q_veh = compute_Q_vehicle(vehicles, ego, X, Y, config=config)
     Q_occ, occ_mask = compute_Q_occlusion(vehicles, ego, X, Y)
-    Q_merge = compute_Q_merge(vehicles, ego, X, Y)  # Now uses vehicle density
+    Q_merge = compute_Q_merge(vehicles, ego, X, Y, config=config)  # Now uses vehicle density
 
     # Road mask boundary condition now prevents off-road diffusion,
     # so no need to scale down Q_veh. Full source strength maintained.
@@ -327,7 +332,7 @@ def compute_total_Q(vehicles, ego, X, Y):
 # VELOCITY FIELD v_eff = v_flow + v_topo
 # ============================================================
 
-def compute_velocity_field(vehicles, ego, X, Y):
+def compute_velocity_field(vehicles, ego, X, Y, config=None):
     """
     Compute effective velocity field for advection.
 
@@ -345,6 +350,7 @@ def compute_velocity_field(vehicles, ego, X, Y):
         vx_flow, vy_flow: GVF flow field
         vx_topo, vy_topo: Topology drift field
     """
+    c = config or cfg
     # ---- GVF-style flow field ----
     vx_flow = np.zeros_like(X)
     vy_flow = np.zeros_like(Y)
@@ -377,11 +383,11 @@ def compute_velocity_field(vehicles, ego, X, Y):
     
     # ---- Topology drift (merge zone) ----
     # Smooth onset function
-    s = np.clip((X - cfg.merge_x_start) / (cfg.merge_x_end - cfg.merge_x_start), 0, 1)
+    s = np.clip((X - c.merge_x_start) / (c.merge_x_end - c.merge_x_start), 0, 1)
     urgency = s**2 * (3 - 2*s)
     
     # Only apply in merge region
-    in_merge = (Y > 2) & (X > cfg.merge_x_start) & (X < cfg.merge_x_end)
+    in_merge = (Y > 2) & (X > c.merge_x_start) & (X < c.merge_x_end)
     
     vx_topo = np.zeros_like(X)
     vy_topo = -2.0 * urgency * in_merge.astype(float)  # Drift toward mainline
@@ -393,7 +399,7 @@ def compute_velocity_field(vehicles, ego, X, Y):
     return vx, vy, vx_flow, vy_flow, vx_topo, vy_topo
 
 
-def compute_diffusion_field(occ_mask, X, Y, vehicles=None, ego=None):
+def compute_diffusion_field(occ_mask, X, Y, vehicles=None, ego=None, config=None):
     """
     Compute spatially-varying diffusion coefficient.
 
@@ -412,8 +418,9 @@ def compute_diffusion_field(occ_mask, X, Y, vehicles=None, ego=None):
     Returns:
         D: Diffusion coefficient field
     """
-    D = cfg.D0 * np.ones_like(X)
-    D[occ_mask] += cfg.D_occ
+    c = config or cfg
+    D = c.D0 * np.ones_like(X)
+    D[occ_mask] += c.D_occ
 
     # ENHANCED: Add diffusion boost around braking vehicles
     if vehicles is not None and ego is not None:
@@ -460,9 +467,10 @@ class PDESolver:
         road_mask: Smooth mask [0,1] — 1 on road, 0 off road (None = no masking)
     """
 
-    def __init__(self):
-        self.X, self.Y = cfg.X, cfg.Y
-        self.dx, self.dy = cfg.dx, cfg.dy
+    def __init__(self, config=None):
+        self.config = config or cfg
+        self.X, self.Y = self.config.X, self.config.Y
+        self.dx, self.dy = self.config.dx, self.config.dy
         self.R = np.zeros_like(self.X)
         self.R_t = np.zeros_like(self.X)
         self.road_mask = None  # Set via set_road_mask() to enable boundary
@@ -509,8 +517,9 @@ class PDESolver:
         Returns:
             R: Updated risk field
         """
+        c = self.config
         if tau is None:
-            tau = cfg.tau
+            tau = c.tau
 
         R = self.R.copy()
         R_t = self.R_t.copy()
@@ -520,14 +529,14 @@ class PDESolver:
         # ===================================================================
         # Compute spatially-varying decay: λ(x,t) = λ₀ + |v(x,t)|/L_decay
         speed = np.sqrt(vx**2 + vy**2)
-        lambda_field = cfg.lambda_decay + speed / cfg.L_decay
+        lambda_field = c.lambda_decay + speed / c.L_decay
 
         # Add sponge layer at downstream boundary (right edge)
-        if hasattr(cfg, 'sponge_length') and cfg.sponge_length > 0:
+        if hasattr(c, 'sponge_length') and c.sponge_length > 0:
             x_max = self.X[:, -1].mean()  # Right boundary
-            x_sponge_start = x_max - cfg.sponge_length
-            w_sponge = np.clip((self.X - x_sponge_start) / cfg.sponge_length, 0, 1)
-            lambda_field = lambda_field + cfg.lambda_sponge * w_sponge**2
+            x_sponge_start = x_max - c.sponge_length
+            w_sponge = np.clip((self.X - x_sponge_start) / c.sponge_length, 0, 1)
+            lambda_field = lambda_field + c.lambda_sponge * w_sponge**2
 
         # Apply source and decay
         R = R + dt * (Q - lambda_field * R)
@@ -601,9 +610,6 @@ class PDESolver:
             # Steps 1-3 gave us: R_direct = R_old + dt * full_rhs
             # But with telegrapher, we need: R = R_old + dt * R_t_new
 
-            # Store the "instantaneous" update for comparison
-            R_instantaneous = R.copy()
-
             # Update telegrapher velocity toward full_rhs
             R_t = R_t + (dt / tau) * (full_rhs - R_t)
 
@@ -631,8 +637,8 @@ class PDESolver:
                 R_t *= self.road_mask
 
         # Optional smoothing (disabled by default)
-        if hasattr(cfg, 'post_smooth_sigma') and cfg.post_smooth_sigma > 0:
-            R = gaussian_filter(R, sigma=cfg.post_smooth_sigma)
+        if hasattr(c, 'post_smooth_sigma') and c.post_smooth_sigma > 0:
+            R = gaussian_filter(R, sigma=c.post_smooth_sigma)
 
         self.R = R
         self.R_t = R_t if tau > 0 else np.zeros_like(R)

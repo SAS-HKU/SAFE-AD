@@ -1,0 +1,16 @@
+{
+  "dataset": "inD",
+  "recordings": [
+    "06",
+    "07",
+    "08",
+    "09",
+    "10",
+    "11"
+  ],
+  "horizon_s": 3.0,
+  "future_trajectories_used_only_as_labels": true,
+  "label_frame": "future_ego_relative",
+  "bootstrap_unit": "recording",
+  "pinn_checkpoint": "rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt"
+}

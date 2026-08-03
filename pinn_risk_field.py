@@ -110,7 +110,8 @@ class ExiDLoader:
                  perception_range: float = _PERCEPTION_RANGE_DEFAULT,
                  selection_mode: str = 'soft_topk',
                  top_k: int = 5,
-                 threshold_ratio: float = 0.15):
+                 threshold_ratio: float = 0.15,
+                 store_source_components: bool = False):
         self.data_dir        = data_dir
         self.recording_id    = recording_id
         self.max_seconds     = max_seconds
@@ -120,6 +121,7 @@ class ExiDLoader:
         self.selection_mode  = selection_mode
         self.top_k           = top_k
         self.threshold_ratio = threshold_ratio
+        self.store_source_components = bool(store_source_components)
 
         self.snapshots  = []
         self.x_grid     = cfg.x
@@ -191,9 +193,12 @@ class ExiDLoader:
             if ego is None:
                 continue
 
-            Q_total, _, _, occ_mask = compute_total_Q(
+            Q_total, Q_vehicle, Q_occlusion, occ_mask = compute_total_Q(
                 vehicles, ego, self._X, self._Y)
-            Q_total = refine_source_field(Q_total, self._X, self._Y, vehicles)
+            Q_merge = np.clip(Q_total - Q_vehicle - Q_occlusion, 0.0, None)
+            Q_raw = Q_total
+            Q_total = refine_source_field(Q_raw, self._X, self._Y, vehicles)
+            Q_behavior_refinement = np.clip(Q_total - Q_raw, 0.0, None)
             vx, vy, *_ = compute_velocity_field(
                 vehicles, ego, self._X, self._Y)
             D = compute_diffusion_field(occ_mask, self._X, self._Y, vehicles, ego)
@@ -204,10 +209,19 @@ class ExiDLoader:
             ego_track_id = ego.get('trackId')
             v_lat_human = self._future_signed_lateral_velocity(
                 frame_vehicles, f, ego_track_id, frame_rate, horizon_sec=0.5)
+            interaction = self._prospective_interaction_metrics(
+                frame_vehicles,
+                frame_id=f,
+                ego_track_id=ego_track_id,
+                frame_rate=frame_rate,
+                horizons=(1.0, 2.0, 3.0),
+            )
 
-            self.snapshots.append({
+            snapshot = {
                 't'          : t_sim,
                 'dt'         : dt_actual,
+                'frame_id'   : int(f),
+                'recording_id': str(self.recording_id),
                 'R'          : R.copy(),
                 'Q'          : Q_total.copy(),
                 'vx'         : vx.copy(),
@@ -223,8 +237,22 @@ class ExiDLoader:
                 'ego_y'      : float(ego['y']),
                 'ego_ax'     : float(ego.get('a', 0.0)),
                 'ego_v_lat'  : float(v_lat_human),
+                'ego_heading': float(ego.get('heading', 0.0)),
+                'ego_vx'     : float(ego.get('vx', 0.0)),
+                'ego_vy'     : float(ego.get('vy', 0.0)),
                 'ego_trackId': float(ego_track_id if ego_track_id is not None else -1),
-            })
+                **interaction,
+            }
+            if self.store_source_components:
+                snapshot.update({
+                    'Q_vehicle': np.asarray(Q_vehicle, dtype=np.float32).copy(),
+                    'Q_occlusion': np.asarray(Q_occlusion, dtype=np.float32).copy(),
+                    'Q_merge': np.asarray(Q_merge, dtype=np.float32).copy(),
+                    'Q_behavior_refinement': np.asarray(
+                        Q_behavior_refinement, dtype=np.float32
+                    ).copy(),
+                })
+            self.snapshots.append(snapshot)
             t_sim += dt_actual
             stored += 1
 
@@ -254,6 +282,8 @@ class ExiDLoader:
             if vclass not in ('car', 'truck', 'van', 'bus', 'motorcycle'):
                 continue
             drift_class = 'truck' if vclass in ('truck', 'bus', 'van') else 'car'
+            width = float(meta_by_id[tid].get('width', 1.9))
+            length = float(meta_by_id[tid].get('length', 4.8 if drift_class == 'car' else 10.0))
             frames = t['frame']
             for i, f in enumerate(frames):
                 f = int(f)
@@ -267,9 +297,165 @@ class ExiDLoader:
                     'ay'     : float(t['yAcceleration'][i]),
                     'heading': float(t['heading'][i]) * np.pi / 180.0,
                     'class'  : drift_class,
+                    'width'  : width,
+                    'length' : length,
                 }
                 lookup.setdefault(f, []).append(entry)
         return lookup
+
+    @staticmethod
+    def _pair_metrics(ego, other, prediction_horizon: float = 3.0):
+        """Return footprint clearance, closing TTC, and required deceleration.
+
+        These quantities use only recorded kinematics.  They are intentionally
+        independent of the PDE source and of every RL reward term.
+        """
+        heading = float(ego.get('heading', 0.0))
+        ch, sh = np.cos(heading), np.sin(heading)
+        dx = float(other['x'] - ego['x'])
+        dy = float(other['y'] - ego['y'])
+        longitudinal = ch * dx + sh * dy
+        lateral = -sh * dx + ch * dy
+
+        half_length = 0.5 * (float(ego.get('length', 4.8)) + float(other.get('length', 4.8)))
+        half_width = 0.5 * (float(ego.get('width', 1.9)) + float(other.get('width', 1.9)))
+        gap_long = max(0.0, abs(longitudinal) - half_length)
+        gap_lat = max(0.0, abs(lateral) - half_width)
+        clearance = float(np.hypot(gap_long, gap_lat))
+
+        rvx = float(other.get('vx', 0.0) - ego.get('vx', 0.0))
+        rvy = float(other.get('vy', 0.0) - ego.get('vy', 0.0))
+        distance = max(float(np.hypot(dx, dy)) - half_length, 0.0)
+        closing_speed = -(dx * rvx + dy * rvy) / max(float(np.hypot(dx, dy)), 1e-6)
+        rel_speed_sq = rvx * rvx + rvy * rvy
+        t_closest = -(dx * rvx + dy * rvy) / max(rel_speed_sq, 1e-6)
+        closest_dx = dx + np.clip(t_closest, 0.0, prediction_horizon) * rvx
+        closest_dy = dy + np.clip(t_closest, 0.0, prediction_horizon) * rvy
+        closest_center = float(np.hypot(closest_dx, closest_dy))
+
+        ttc = np.inf
+        if closing_speed > 0.1 and 0.0 < t_closest <= prediction_horizon:
+            # Reject pairs whose constant-velocity paths do not approach the
+            # combined footprint closely enough to represent a conflict.
+            footprint_radius = float(np.hypot(half_length, half_width))
+            if closest_center <= footprint_radius + 2.0:
+                ttc = distance / closing_speed
+        is_conflict_path = False
+        if closing_speed > 0.1 and 0.0 < t_closest <= prediction_horizon:
+            footprint_radius = float(np.hypot(half_length, half_width))
+            is_conflict_path = closest_center <= footprint_radius + 2.0
+        drac = (
+            (closing_speed ** 2) / (2.0 * max(distance, 0.1))
+            if is_conflict_path else 0.0
+        )
+        return clearance, float(ttc), float(drac)
+
+    def _prospective_interaction_metrics(self, frame_lookup, frame_id,
+                                         ego_track_id, frame_rate,
+                                         horizons=(1.0, 2.0, 3.0)):
+        """Compute future interaction endpoints from observed trajectories.
+
+        The labels support construct-validity tests in which a field queried at
+        the current frame predicts later events.  They do not enter PINN or RL
+        training.
+        """
+        horizons = tuple(sorted(float(h) for h in horizons))
+        max_horizon = max(horizons)
+        stride = max(1, round(frame_rate * self.DT_TARGET))
+        max_frame = int(frame_id + round(max_horizon * frame_rate))
+
+        records = []
+        for future_frame in range(int(frame_id), max_frame + 1, stride):
+            entries = frame_lookup.get(future_frame, [])
+            ego = next((e for e in entries if e['trackId'] == ego_track_id), None)
+            if ego is None:
+                continue
+            ego_heading = float(ego.get('heading', 0.0))
+            ego_long_accel = (
+                float(ego.get('ax', 0.0)) * np.cos(ego_heading)
+                + float(ego.get('ay', 0.0)) * np.sin(ego_heading)
+            )
+            min_clearance = np.inf
+            min_ttc = np.inf
+            max_drac = 0.0
+            other_hard_brake = False
+            for other in entries:
+                if other['trackId'] == ego_track_id:
+                    continue
+                clearance, ttc, drac = self._pair_metrics(ego, other, max_horizon)
+                min_clearance = min(min_clearance, clearance)
+                min_ttc = min(min_ttc, ttc)
+                max_drac = max(max_drac, drac)
+                other_heading = float(other.get('heading', 0.0))
+                other_accel = (
+                    float(other.get('ax', 0.0)) * np.cos(other_heading)
+                    + float(other.get('ay', 0.0)) * np.sin(other_heading)
+                )
+                center_distance = float(np.hypot(
+                    float(other['x'] - ego['x']),
+                    float(other['y'] - ego['y']),
+                ))
+                other_hard_brake = (
+                    other_hard_brake
+                    or (center_distance <= 30.0 and other_accel <= -3.0)
+                )
+            records.append({
+                'elapsed': (future_frame - frame_id) / max(frame_rate, 1e-6),
+                'min_clearance': min_clearance,
+                'min_ttc': min_ttc,
+                'max_drac': max_drac,
+                'ego_hard_brake': ego_long_accel <= -3.0,
+                'other_hard_brake': other_hard_brake,
+            })
+
+        if records:
+            current = records[0]
+        else:
+            current = {
+                'min_clearance': np.inf,
+                'min_ttc': np.inf,
+                'max_drac': 0.0,
+                'ego_hard_brake': False,
+                'other_hard_brake': False,
+            }
+        out = {
+            'current_min_clearance': float(current['min_clearance']),
+            'current_min_ttc': float(current['min_ttc']),
+            'current_max_drac': float(current['max_drac']),
+        }
+        for horizon in horizons:
+            subset = [row for row in records if 0.0 < row['elapsed'] <= horizon + 1e-9]
+            suffix = f"{int(round(horizon))}s"
+            if not subset:
+                out[f'future_min_clearance_{suffix}'] = np.inf
+                out[f'future_min_ttc_{suffix}'] = np.inf
+                out[f'future_max_drac_{suffix}'] = 0.0
+                out[f'future_ego_hard_brake_{suffix}'] = 0.0
+                out[f'future_other_hard_brake_{suffix}'] = 0.0
+                out[f'future_low_clearance_{suffix}'] = 0.0
+                out[f'future_low_ttc_{suffix}'] = 0.0
+                out[f'future_hard_brake_{suffix}'] = 0.0
+                out[f'future_conflict_{suffix}'] = 0.0
+                continue
+            min_clearance = min(row['min_clearance'] for row in subset)
+            min_ttc = min(row['min_ttc'] for row in subset)
+            max_drac = max(row['max_drac'] for row in subset)
+            ego_hard_brake = any(row['ego_hard_brake'] for row in subset)
+            other_hard_brake = any(row['other_hard_brake'] for row in subset)
+            low_clearance = min_clearance < 1.5
+            low_ttc = min_ttc < 2.0
+            hard_brake = ego_hard_brake or other_hard_brake
+            conflict = low_clearance or low_ttc or hard_brake
+            out[f'future_min_clearance_{suffix}'] = float(min_clearance)
+            out[f'future_min_ttc_{suffix}'] = float(min_ttc)
+            out[f'future_max_drac_{suffix}'] = float(max_drac)
+            out[f'future_ego_hard_brake_{suffix}'] = float(ego_hard_brake)
+            out[f'future_other_hard_brake_{suffix}'] = float(other_hard_brake)
+            out[f'future_low_clearance_{suffix}'] = float(low_clearance)
+            out[f'future_low_ttc_{suffix}'] = float(low_ttc)
+            out[f'future_hard_brake_{suffix}'] = float(hard_brake)
+            out[f'future_conflict_{suffix}'] = float(conflict)
+        return out
 
     def _future_signed_lateral_velocity(self, frame_lookup, frame_id, ego_track_id,
                                         frame_rate: float, horizon_sec: float = 0.5) -> float:
@@ -413,17 +599,28 @@ class RiskFieldNet(nn.Module):
     input to a 2*rff_features-dim sinusoidal embedding before the MLP.
     Skip connection re-injects the embedding at the midpoint layer.
 
-    use_context=True  → 9-dim input (adds N_agents, dist_nearest columns)
+    use_context=True adds N_agents and dist_nearest (9-D input); enabling
+    use_spatial_context also adds nearest-agent direction (11-D input).
     use_rff=True      → RFF embedding front-end (fixes spectral bias)
     """
 
     def __init__(self, hidden: int = 128, depth: int = 6,
                  use_rff: bool = False, rff_features: int = 64, rff_scale: float = 10.0,
-                 use_context: bool = False):
+                 use_context: bool = False, rff_include_raw: bool = False,
+                 output_bias_init: float = 0.0, use_spatial_context: bool = False,
+                 use_distance_rbf: bool = False):
         super().__init__()
-        base_dim = 9 if use_context else 7   # +N_agents, +dist_nearest when context enabled
+        base_dim = 9 if use_context else 7
+        if use_context and use_spatial_context:
+            base_dim += 2
+        if use_context and use_distance_rbf:
+            base_dim += 3
 
         self.use_context = use_context
+        self.use_spatial_context = bool(use_spatial_context)
+        self.use_distance_rbf = bool(use_distance_rbf)
+        self.rff_include_raw = bool(rff_include_raw)
+        self.output_bias_init = float(output_bias_init)
 
         self.use_rff     = use_rff
         self.skip_at     = depth // 2
@@ -432,7 +629,7 @@ class RiskFieldNet(nn.Module):
 
         if use_rff:
             self.rff  = RandomFourierFeatures(base_dim, rff_features, rff_scale)
-            in_dim    = self.rff.out_dim      # 2 * rff_features
+            in_dim = self.rff.out_dim + (base_dim if self.rff_include_raw else 0)
         else:
             self.rff  = None
             in_dim    = base_dim
@@ -454,11 +651,13 @@ class RiskFieldNet(nn.Module):
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.zeros_(m.bias)
+        nn.init.constant_(self.out.bias, self.output_bias_init)
 
     def forward(self, inp):
         """inp: (N, 7) normalised inputs."""
         if self.use_rff:
-            enc = self.rff(inp)   # (N, 2*rff_features)
+            encoded = self.rff(inp)
+            enc = torch.cat([inp, encoded], dim=-1) if self.rff_include_raw else encoded
         else:
             enc = inp             # (N, 7)
 
@@ -511,8 +710,9 @@ class FieldInterpolator:
                 for k, interp in self._interp3d.items()}
 
     # --- compatibility shims so PINNTrainer can use either cache type ---
-    def sample_data(self, n, rng=None):
+    def sample_data(self, n, rng=None, focus_fraction=0.0):
         """Draw n random grid-aligned samples; returns dict of (n,) arrays."""
+        del focus_fraction
         rng = rng or np.random.default_rng()
         idx = rng.integers(0, len(self.times), n)
         ny, nx = len(self.y_grid), len(self.x_grid)
@@ -528,9 +728,9 @@ class FieldInterpolator:
             out[key] = interp3d(pts).astype(np.float32)
         return out
 
-    def sample_colloc(self, n, rng=None):
+    def sample_colloc(self, n, rng=None, focus_fraction=0.0):
         """Same as sample_data but returns only the physics input columns."""
-        return self.sample_data(n, rng)
+        return self.sample_data(n, rng, focus_fraction=focus_fraction)
 
 
 class FlatSampleCache:
@@ -538,8 +738,8 @@ class FlatSampleCache:
     Memory-efficient alternative to FieldInterpolator for large datasets.
 
     Pre-samples `pts_per_snap` random grid points from every snapshot at
-    construction time and stores them as a flat float32 array of shape
-    (N_total, 8) with columns [x, y, t, Q, vx, vy, D, R].
+    construction time and stores them as a flat float32 array containing the
+    local coefficients, scene context, occlusion mask, and teacher field.
 
     Memory: N_snaps × pts_per_snap × 8 × 4 bytes
     Example: 4500 snaps × 100 pts = 14 MB (vs ~1.8 GB for 3-D interpolator)
@@ -547,8 +747,11 @@ class FlatSampleCache:
     Query time: O(1) — random indexing into the pre-built table.
     """
 
-    # Columns: x, y, t, Q, N_agents, dist_nearest, vx, vy, D, occ_mask, R
-    KEYS = ('x', 'y', 't', 'Q', 'N_agents', 'dist_nearest', 'vx', 'vy', 'D', 'occ_mask', 'R')
+    # Local coefficients plus directional scene context at sampled grid points.
+    KEYS = (
+        'x', 'y', 't', 'Q', 'N_agents', 'dist_nearest',
+        'dist_dx', 'dist_dy', 'vx', 'vy', 'D', 'occ_mask', 'R',
+    )
 
     def __init__(self, snapshots, x_grid, y_grid,
                  pts_per_snap: int = 100, seed: int = 0):
@@ -566,40 +769,79 @@ class FlatSampleCache:
         for s in snapshots:
             yi = rng.integers(0, ny, pts_per_snap)
             xi = rng.integers(0, nx, pts_per_snap)
+            dn_grid = np.asarray(
+                s.get('dist_nearest', np.full_like(s['R'], 1000.0)),
+                dtype=np.float32,
+            )
+            dn_dy, dn_dx = np.gradient(
+                dn_grid,
+                float(y_grid[1] - y_grid[0]),
+                float(x_grid[1] - x_grid[0]),
+            )
             buf[row:row + pts_per_snap, 0] = x_grid[xi]
             buf[row:row + pts_per_snap, 1] = y_grid[yi]
             buf[row:row + pts_per_snap, 2] = s['t']
             buf[row:row + pts_per_snap, 3] = s['Q'][yi, xi]
             buf[row:row + pts_per_snap, 4] = float(s.get('N_agents', 0))
-            dn = s.get('dist_nearest', None)
-            buf[row:row + pts_per_snap, 5] = (
-                dn[yi, xi] if dn is not None else 1000.0)
-            buf[row:row + pts_per_snap, 6] = s['vx'][yi, xi]
-            buf[row:row + pts_per_snap, 7] = s['vy'][yi, xi]
-            buf[row:row + pts_per_snap, 8] = s['D'][yi, xi]
-            buf[row:row + pts_per_snap, 9] = s.get('occ_mask', np.zeros_like(s['R'], dtype=np.float32))[yi, xi]
-            buf[row:row + pts_per_snap, 10] = s['R'][yi, xi]
+            buf[row:row + pts_per_snap, 5] = dn_grid[yi, xi]
+            buf[row:row + pts_per_snap, 6] = dn_dx[yi, xi]
+            buf[row:row + pts_per_snap, 7] = dn_dy[yi, xi]
+            buf[row:row + pts_per_snap, 8] = s['vx'][yi, xi]
+            buf[row:row + pts_per_snap, 9] = s['vy'][yi, xi]
+            buf[row:row + pts_per_snap, 10] = s['D'][yi, xi]
+            buf[row:row + pts_per_snap, 11] = s.get('occ_mask', np.zeros_like(s['R'], dtype=np.float32))[yi, xi]
+            buf[row:row + pts_per_snap, 12] = s['R'][yi, xi]
             row += pts_per_snap
 
-        self._buf = buf   # (N, 10)
+        self._buf = buf
         self._N   = N
+        self._refresh_sampling_indices()
         mb = N * n_cols * 4 / 1e6
         print(f"[FlatSampleCache] {N:,} samples from {len(snapshots)} snaps "
               f"({pts_per_snap} pts/snap, {n_cols} cols) — {mb:.1f} MB")
 
-    def _draw(self, n, rng=None):
-        idx = rng.integers(0, self._N, n) if rng is not None \
-              else np.random.randint(0, self._N, n)
-        return self._buf[idx]   # (n, 8)
+    def _refresh_sampling_indices(self):
+        """Index hotspot cores and low-risk near-agent halos."""
+        risk = self._buf[:, self.KEYS.index('R')]
+        source = self._buf[:, self.KEYS.index('Q')]
+        distance = self._buf[:, self.KEYS.index('dist_nearest')]
+        self._focus_indices = np.flatnonzero((risk >= 0.05) | (source >= 0.05))
+        if self._focus_indices.size == 0:
+            self._focus_indices = np.arange(self._N, dtype=np.int64)
+        self._halo_indices = np.flatnonzero(
+            (risk < 0.05) & (source < 0.05) & (distance >= 2.0) & (distance <= 25.0)
+        )
 
-    def sample_data(self, n, rng=None):
+    def _draw(self, n, rng=None, focus_fraction=0.0):
+        rng = rng if rng is not None else np.random.default_rng()
+        n = int(n)
+        focus_fraction = float(np.clip(focus_fraction, 0.0, 1.0))
+        n_focus = min(n, int(round(n * focus_fraction)))
+        n_uniform = n - n_focus
+        parts = []
+        if n_uniform:
+            parts.append(rng.integers(0, self._N, n_uniform))
+        if n_focus:
+            n_halo = n_focus // 2 if self._halo_indices.size else 0
+            n_core = n_focus - n_halo
+            if n_core:
+                focus_pos = rng.integers(0, self._focus_indices.size, n_core)
+                parts.append(self._focus_indices[focus_pos])
+            if n_halo:
+                halo_pos = rng.integers(0, self._halo_indices.size, n_halo)
+                parts.append(self._halo_indices[halo_pos])
+        idx = np.concatenate(parts) if len(parts) > 1 else parts[0]
+        rng.shuffle(idx)
+        return self._buf[idx]
+
+    def sample_data(self, n, rng=None, focus_fraction=0.0):
         """Draw n samples; returns dict with keys x,y,t,Q,vx,vy,D,R."""
-        rows = self._draw(n, rng)
+        rows = self._draw(n, rng, focus_fraction=focus_fraction)
         return {k: rows[:, i] for i, k in enumerate(self.KEYS)}
 
-    def sample_colloc(self, n, rng=None):
+    def sample_colloc(self, n, rng=None, focus_fraction=0.0):
         """Same interface — physics collocation uses same columns."""
-        return self.sample_data(n, rng)
+        return self.sample_data(n, rng, focus_fraction=focus_fraction)
 
     def save(self, path: str):
         np.save(path, self._buf)
@@ -612,7 +854,13 @@ class FlatSampleCache:
         obj.y_grid = y_grid
         obj.times  = times
         obj._buf   = np.load(path)
+        if obj._buf.ndim != 2 or obj._buf.shape[1] != len(obj.KEYS):
+            raise ValueError(
+                f"Sample cache {path} has {obj._buf.shape[1]} columns; "
+                f"expected {len(obj.KEYS)} for the current schema"
+            )
         obj._N     = len(obj._buf)
+        obj._refresh_sampling_indices()
         print(f"[FlatSampleCache] loaded ← {path}  ({obj._N:,} samples)")
         return obj
 
@@ -682,8 +930,9 @@ class Normalizer:
             'D'          : (D_min,               max(D_max,   1e-3)),
             'R'          : (0.0,                 max(R_max,   1e-3)),
             'N_agents'   : (0.0,                 max(Na_max or 1.0, 1.0)),
-            'dist_nearest': (0.0,                max(dn_max or _PERCEPTION_RANGE_DEFAULT,
-                                                     _PERCEPTION_RANGE_DEFAULT)),
+            'dist_nearest': (0.0,                _PERCEPTION_RANGE_DEFAULT),
+            'dist_dx'     : (-1.5,               1.5),
+            'dist_dy'     : (-1.5,               1.5),
         }
         # PDE physical parameters (not normalised, just stored)
         self.lambda_decay = cfg.lambda_decay
@@ -698,13 +947,14 @@ class Normalizer:
         return (vals + 1.0) / 2.0 * (hi - lo) + lo
 
     def build_input(self, x, y, t, Q, vx, vy, D,
-                    N_agents=None, dist_nearest=None, device='cpu'):
+                    N_agents=None, dist_nearest=None,
+                    dist_dx=None, dist_dy=None, distance_rbf=False, device='cpu'):
         """
         Assemble normalised tensor.
 
-        Returns (N, 7) when N_agents/dist_nearest are None,
-        or     (N, 9) when both context arrays are provided.
-        Order: [x, y, t, Q, (N_agents, dist_nearest,) vx, vy, D]
+        Returns (N, 7) without context, (N, 9) with scalar/distance context,
+        or (N, 11) when the two directional distance components are included.
+        Order: [x, y, t, Q, (N_agents, dist_nearest, dist_dx, dist_dy), vx, vy, D].
         """
         def _t(arr, key):
             return torch.tensor(
@@ -717,7 +967,15 @@ class Normalizer:
             Na = (np.full_like(np.asarray(x, dtype=np.float32), float(N_agents))
                   if np.ndim(N_agents) == 0 else np.asarray(N_agents, dtype=np.float32))
             cols.append(_t(Na,                              'N_agents'))
-            cols.append(_t(np.asarray(dist_nearest, dtype=np.float32), 'dist_nearest'))
+            distance = np.asarray(dist_nearest, dtype=np.float32)
+            cols.append(_t(distance, 'dist_nearest'))
+            if distance_rbf:
+                for scale in (2.0, 6.0, 15.0):
+                    basis = 2.0 * np.exp(-distance / scale) - 1.0
+                    cols.append(torch.tensor(basis, dtype=torch.float32))
+            if dist_dx is not None and dist_dy is not None:
+                cols.append(_t(np.asarray(dist_dx, dtype=np.float32), 'dist_dx'))
+                cols.append(_t(np.asarray(dist_dy, dtype=np.float32), 'dist_dy'))
         cols += [_t(vx, 'vx'), _t(vy, 'vy'), _t(D, 'D')]
         return torch.stack(cols, dim=-1).to(device)
 
@@ -737,12 +995,16 @@ class PINNTrainer:
                  interp,          # FieldInterpolator or FlatSampleCache
                  hidden=128, depth=6,
                  use_rff=False, rff_features=64, rff_scale=10.0,
-                 use_context=False,
+                 use_context=False, rff_include_raw=False, output_bias_init=0.0,
+                 use_spatial_context=False, use_distance_rbf=False,
                  device='cpu',
                  w_data=1.0, w_phys=0.8, w_ic=0.2, w_bc=0.2, w_smooth=0.15,
                  w_grad=0.20, w_temp=0.10, w_beh_long=0.15, w_beh_lat=0.10,
                  n_colloc=4096, n_data=4096,
-                 selection_mode='soft_topk', top_k=5, threshold_ratio=0.15):
+                 risk_sample_fraction=0.65, risk_loss_boost=15.0,
+                 risk_halo_boost=2.0,
+                 selection_mode='soft_topk', top_k=5, threshold_ratio=0.15,
+                 checkpoint_metadata=None):
 
         self.norm        = norm
         self.cache       = interp
@@ -750,6 +1012,8 @@ class PINNTrainer:
         self.device      = torch.device(device)
         self.snaps       = snapshots
         self.use_context = use_context
+        self.use_spatial_context = bool(use_spatial_context)
+        self.use_distance_rbf = bool(use_distance_rbf)
 
         self.w_data   = w_data
         self.w_phys   = w_phys
@@ -762,18 +1026,37 @@ class PINNTrainer:
         self.w_beh_lat  = w_beh_lat
         self.n_co     = n_colloc
         self.n_da     = n_data
+        self.risk_sample_fraction = float(np.clip(risk_sample_fraction, 0.0, 1.0))
+        self.risk_loss_boost = max(0.0, float(risk_loss_boost))
+        self.risk_halo_boost = max(0.0, float(risk_halo_boost))
         self.selection_mode = selection_mode
         self.top_k = int(top_k)
         self.threshold_ratio = float(threshold_ratio)
+        self.checkpoint_metadata = dict(checkpoint_metadata or {})
         self.rng      = np.random.default_rng(42)
+        self._focus_pixel_cache = {}
         self.dx       = float(self.interp.x_grid[1] - self.interp.x_grid[0])
         self.dy       = float(self.interp.y_grid[1] - self.interp.y_grid[0])
         self._has_behavior = any(('ego_x' in s and 'ego_y' in s) for s in self.snaps)
+        explicit_next = getattr(self.snaps, 'valid_next_indices', None)
+        if explicit_next is not None:
+            self._valid_next_indices = np.asarray(explicit_next, dtype=np.int64)
+        else:
+            self._valid_next_indices = np.asarray([
+                idx for idx in range(max(0, len(self.snaps) - 1))
+                if str(self.snaps[idx].get('recording_id', '')) ==
+                   str(self.snaps[idx + 1].get('recording_id', ''))
+                and float(self.snaps[idx + 1]['t']) > float(self.snaps[idx]['t'])
+            ], dtype=np.int64)
 
         self.model   = RiskFieldNet(
             hidden=hidden, depth=depth,
             use_rff=use_rff, rff_features=rff_features, rff_scale=rff_scale,
             use_context=use_context,
+            rff_include_raw=rff_include_raw,
+            output_bias_init=output_bias_init,
+            use_spatial_context=use_spatial_context,
+            use_distance_rbf=use_distance_rbf,
         ).to(self.device)
         self.history = {'loss': [], 'L_data': [], 'L_phys': [],
                         'L_ic': [], 'L_bc': [], 'L_smooth': [],
@@ -785,9 +1068,15 @@ class PINNTrainer:
     # Training
     # ------------------------------------------------------------------
 
-    def train(self, epochs=2000, lr=1e-3, print_every=200):
+    def train(self, epochs=2000, lr=1e-3, print_every=200,
+              checkpoint_every=0, checkpoint_callback=None,
+              optimizer_state=None, scheduler_state=None):
         opt  = torch.optim.Adam(self.model.parameters(), lr=lr)
         sched = CosineAnnealingLR(opt, T_max=epochs, eta_min=1e-5)
+        if optimizer_state is not None:
+            opt.load_state_dict(optimizer_state)
+        if scheduler_state is not None:
+            sched.load_state_dict(scheduler_state)
         t0   = time.time()
 
         rff_tag = (f"RFF(feat={self.model.rff.B.shape[1]}, "
@@ -800,6 +1089,9 @@ class PINNTrainer:
               f"ic={self.w_ic}, bc={self.w_bc}, smooth={self.w_smooth}, "
               f"grad={self.w_grad}, temp={self.w_temp}, "
               f"beh=({self.w_beh_long},{self.w_beh_lat}))")
+        print(f"         risk balancing=(focus={self.risk_sample_fraction:.2f}, "
+              f"loss_boost={self.risk_loss_boost:.1f}, "
+              f"halo_boost={self.risk_halo_boost:.1f})")
 
         for ep in range(1, epochs + 1):
             self.model.train()
@@ -848,6 +1140,12 @@ class PINNTrainer:
                       f"ic={L_ic.item():.4e}  bc={L_bc.item():.4e}"
                       f"{smooth_str}{grad_str}{temp_str}{beh_str}  t={elapsed:.0f}s")
 
+            self._optimizer_state = opt.state_dict()
+            self._scheduler_state = sched.state_dict()
+            if (checkpoint_callback is not None and checkpoint_every > 0
+                    and ep % int(checkpoint_every) == 0):
+                checkpoint_callback(ep)
+
         print(f"[Phase2] Training done. Final loss = {self.history['loss'][-1]:.4e}")
         return self.history
 
@@ -863,17 +1161,70 @@ class PINNTrainer:
                 samp['x'], samp['y'], samp['t'],
                 samp['Q'], samp['vx'], samp['vy'], samp['D'],
                 N_agents=samp['N_agents'], dist_nearest=samp['dist_nearest'],
+                dist_dx=(samp.get('dist_dx') if self.use_spatial_context else None),
+                dist_dy=(samp.get('dist_dy') if self.use_spatial_context else None),
+                distance_rbf=self.use_distance_rbf,
                 device=str(self.device))
         return self.norm.build_input(
             samp['x'], samp['y'], samp['t'],
             samp['Q'], samp['vx'], samp['vy'], samp['D'],
             device=str(self.device))
 
-    def _grid_sample_batch(self, n: int, require_next: bool = False) -> dict:
-        max_idx = len(self.snaps) - (1 if require_next else 0)
-        snap_idx = self.rng.integers(0, max_idx, size=n)
-        xi = self.rng.integers(0, len(self.interp.x_grid), size=n)
-        yi = self.rng.integers(0, len(self.interp.y_grid), size=n)
+    def _grid_sample_batch(self, n: int, require_next: bool = False,
+                           focus_fraction=None) -> dict:
+        if require_next and self._valid_next_indices.size == 0:
+            raise RuntimeError("Temporal loss requires consecutive snapshots within a recording")
+
+        pool = self._valid_next_indices if require_next else None
+
+        def draw_snapshots(count):
+            if pool is not None:
+                return self.rng.choice(pool, size=count, replace=True)
+            return self.rng.integers(0, len(self.snaps), size=count)
+
+        focus_fraction = self.risk_sample_fraction if focus_fraction is None else focus_fraction
+        n_focus = min(int(n), int(round(int(n) * float(np.clip(focus_fraction, 0.0, 1.0)))))
+        n_uniform = int(n) - n_focus
+
+        snap_parts, xi_parts, yi_parts = [], [], []
+        if n_uniform:
+            uniform_snaps = draw_snapshots(n_uniform)
+            snap_parts.append(uniform_snaps)
+            xi_parts.append(self.rng.integers(0, len(self.interp.x_grid), size=n_uniform))
+            yi_parts.append(self.rng.integers(0, len(self.interp.y_grid), size=n_uniform))
+
+        if n_focus:
+            focus_snaps = draw_snapshots(n_focus)
+            focus_x = np.empty(n_focus, dtype=np.int64)
+            focus_y = np.empty(n_focus, dtype=np.int64)
+            nx = len(self.interp.x_grid)
+            for snap_value in np.unique(focus_snaps):
+                snap_key = int(snap_value)
+                flat = self._focus_pixel_cache.get(snap_key)
+                if flat is None:
+                    snap = self.snaps[snap_key]
+                    flat = np.flatnonzero(
+                        (np.asarray(snap['R']) >= 0.05) |
+                        (np.asarray(snap['Q']) >= 0.05)
+                    )
+                    if flat.size == 0:
+                        flat = np.arange(
+                            len(self.interp.y_grid) * len(self.interp.x_grid),
+                            dtype=np.int64,
+                        )
+                    self._focus_pixel_cache[snap_key] = flat
+                positions = np.flatnonzero(focus_snaps == snap_value)
+                selected = flat[self.rng.integers(0, flat.size, size=positions.size)]
+                focus_y[positions], focus_x[positions] = np.divmod(selected, nx)
+            snap_parts.append(focus_snaps)
+            xi_parts.append(focus_x)
+            yi_parts.append(focus_y)
+
+        snap_idx = np.concatenate(snap_parts) if len(snap_parts) > 1 else snap_parts[0]
+        xi = np.concatenate(xi_parts) if len(xi_parts) > 1 else xi_parts[0]
+        yi = np.concatenate(yi_parts) if len(yi_parts) > 1 else yi_parts[0]
+        order = self.rng.permutation(int(n))
+        snap_idx, xi, yi = snap_idx[order], xi[order], yi[order]
 
         out = {
             'snap_idx': snap_idx,
@@ -900,18 +1251,24 @@ class PINNTrainer:
             for idx, xj, yj in zip(snap_idx, xi, yi)
         ], dtype=np.float32)
 
-        deriv_Dx, deriv_Dy, div_v, grad_Rx, grad_Ry, R_next, dt_next = [], [], [], [], [], [], []
+        deriv_Dx, deriv_Dy, div_v = [], [], []
+        grad_Rx, grad_Ry, dist_dx, dist_dy, R_next, dt_next = [], [], [], [], [], []
         for idx, xj, yj in zip(snap_idx, xi, yi):
             snap = self.snaps[int(idx)]
             D_x, D_y = finite_difference_samples(snap['D'], np.array([xj]), np.array([yj]), self.dx, self.dy)
             vx_x, _ = finite_difference_samples(snap['vx'], np.array([xj]), np.array([yj]), self.dx, self.dy)
             _, vy_y = finite_difference_samples(snap['vy'], np.array([xj]), np.array([yj]), self.dx, self.dy)
             R_x, R_y = finite_difference_samples(snap['R'], np.array([xj]), np.array([yj]), self.dx, self.dy)
+            dn_x, dn_y = finite_difference_samples(
+                snap['dist_nearest'], np.array([xj]), np.array([yj]), self.dx, self.dy
+            )
             deriv_Dx.append(D_x[0])
             deriv_Dy.append(D_y[0])
             div_v.append(vx_x[0] + vy_y[0])
             grad_Rx.append(R_x[0])
             grad_Ry.append(R_y[0])
+            dist_dx.append(dn_x[0])
+            dist_dy.append(dn_y[0])
             if require_next:
                 snap_next = self.snaps[int(idx) + 1]
                 R_next.append(float(snap_next['R'][int(yj), int(xj)]))
@@ -922,6 +1279,8 @@ class PINNTrainer:
         out['div_v'] = np.asarray(div_v, dtype=np.float32)
         out['R_x_true'] = np.asarray(grad_Rx, dtype=np.float32)
         out['R_y_true'] = np.asarray(grad_Ry, dtype=np.float32)
+        out['dist_dx'] = np.asarray(dist_dx, dtype=np.float32)
+        out['dist_dy'] = np.asarray(dist_dy, dtype=np.float32)
         if require_next:
             out['R_next'] = np.asarray(R_next, dtype=np.float32)
             out['dt_next'] = np.asarray(dt_next, dtype=np.float32)
@@ -946,7 +1305,18 @@ class PINNTrainer:
         cols = [xn, yn, tn, _const(samp['Q'], 'Q')]
         if self.use_context:
             cols.append(_const(samp['N_agents'], 'N_agents'))
+            distance = torch.tensor(
+                np.asarray(samp['dist_nearest'], dtype=np.float32),
+                dtype=torch.float32,
+                device=self.device,
+            )
             cols.append(_const(samp['dist_nearest'], 'dist_nearest'))
+            if self.use_distance_rbf:
+                for scale in (2.0, 6.0, 15.0):
+                    cols.append(2.0 * torch.exp(-distance / scale) - 1.0)
+            if self.use_spatial_context:
+                cols.append(_const(samp['dist_dx'], 'dist_dx'))
+                cols.append(_const(samp['dist_dy'], 'dist_dy'))
         cols.extend([
             _const(samp['vx'], 'vx'),
             _const(samp['vy'], 'vy'),
@@ -982,8 +1352,17 @@ class PINNTrainer:
                 (self.interp.y_grid, self.interp.x_grid), dn,
                 method='linear', bounds_error=False, fill_value=float(_PERCEPTION_RANGE_DEFAULT))
             out['dist_nearest'] = fi(pts).astype(np.float32)
+            dn_dy, dn_dx = np.gradient(dn, self.dy, self.dx)
+            for key, field in (('dist_dx', dn_dx), ('dist_dy', dn_dy)):
+                fi = RegularGridInterpolator(
+                    (self.interp.y_grid, self.interp.x_grid), field,
+                    method='linear', bounds_error=False, fill_value=0.0,
+                )
+                out[key] = fi(pts).astype(np.float32)
         else:
             out['dist_nearest'] = np.full(len(xs), _PERCEPTION_RANGE_DEFAULT, dtype=np.float32)
+            out['dist_dx'] = np.zeros(len(xs), dtype=np.float32)
+            out['dist_dy'] = np.zeros(len(xs), dtype=np.float32)
         out['N_agents'] = np.full(len(xs), float(snap.get('N_agents', 0.0)), dtype=np.float32)
         out['t'] = np.full(len(xs), float(snap['t']), dtype=np.float32)
         out['x'] = xs.astype(np.float32)
@@ -991,14 +1370,27 @@ class PINNTrainer:
         return out
 
     def _data_loss(self):
-        """MSE between PINN output and numerical R, using cache.sample_data()."""
-        samp   = self.cache.sample_data(self.n_da)
+        """Risk-balanced regression against numerical teacher snapshots."""
+        samp = self.cache.sample_data(
+            self.n_da,
+            rng=self.rng,
+            focus_fraction=self.risk_sample_fraction,
+        )
         inp    = self._build_input_from_samp(samp)
         R_pred = self.model(inp).squeeze(-1)
         R_true = torch.tensor(samp['R'], dtype=torch.float32, device=self.device)
 
         R_scale = self.norm.ranges['R'][1]
-        return torch.mean((R_pred - R_true / max(R_scale, 1e-3))**2)
+        target = R_true / max(R_scale, 1e-3)
+        weights = 1.0 + self.risk_loss_boost * torch.sqrt(torch.clamp(target, min=0.0))
+        distance = torch.tensor(
+            samp['dist_nearest'], dtype=torch.float32, device=self.device
+        )
+        source = torch.tensor(samp['Q'], dtype=torch.float32, device=self.device)
+        halo = (R_true < 0.05) & (source < 0.05) & (distance >= 2.0) & (distance <= 25.0)
+        weights = weights + self.risk_halo_boost * halo.to(dtype=torch.float32)
+        weights = weights / torch.clamp(torch.mean(weights), min=1e-6)
+        return torch.mean(weights * (R_pred - target) ** 2)
 
     def _physics_loss(self):
         samp = self._grid_sample_batch(self.n_co)
@@ -1031,11 +1423,16 @@ class PINNTrainer:
         return torch.mean(residual ** 2)
 
     def _context_zeros(self, n):
-        """Return (Na, dn) default arrays for IC/BC/smooth losses (no agents present)."""
+        """Return default context arrays for agent-free IC/BC samples."""
         if not self.use_context:
-            return None, None
-        return (np.zeros(n, dtype=np.float32),
-                np.full(n, _PERCEPTION_RANGE_DEFAULT, dtype=np.float32))
+            return None, None, None, None
+        zeros = np.zeros(n, dtype=np.float32)
+        return (
+            zeros,
+            np.full(n, _PERCEPTION_RANGE_DEFAULT, dtype=np.float32),
+            zeros.copy() if self.use_spatial_context else None,
+            zeros.copy() if self.use_spatial_context else None,
+        )
 
     def _ic_loss(self):
         """R(x, y, t=0) = 0 (zero initial risk field)."""
@@ -1047,10 +1444,12 @@ class PINNTrainer:
         vx_np= np.zeros(n, dtype=np.float32)
         vy_np= np.zeros(n, dtype=np.float32)
         D_np = np.full(n, cfg.D0, dtype=np.float32)
-        Na, dn = self._context_zeros(n)
+        Na, dn, dn_dx, dn_dy = self._context_zeros(n)
 
         inp  = self.norm.build_input(x_np, y_np, t_np, Q_np, vx_np, vy_np, D_np,
                                      N_agents=Na, dist_nearest=dn,
+                                     dist_dx=dn_dx, dist_dy=dn_dy,
+                                     distance_rbf=self.use_distance_rbf,
                                      device=str(self.device))
         R    = self.model(inp).squeeze(-1)
         return torch.mean(R**2)
@@ -1064,13 +1463,15 @@ class PINNTrainer:
         vx_np= np.zeros(n, dtype=np.float32)
         vy_np= np.zeros(n, dtype=np.float32)
         D_np = np.full(n, cfg.D0, dtype=np.float32)
-        Na, dn = self._context_zeros(n)
+        Na, dn, dn_dx, dn_dy = self._context_zeros(n)
 
         # Left edge (x = x_min)
         xl = np.full(n, cfg.x_min, dtype=np.float32)
         yl = np.random.uniform(cfg.y_min, cfg.y_max, n).astype(np.float32)
         inp_l = self.norm.build_input(xl, yl, t_np, Q_np, vx_np, vy_np, D_np,
                                       N_agents=Na, dist_nearest=dn,
+                                      dist_dx=dn_dx, dist_dy=dn_dy,
+                                      distance_rbf=self.use_distance_rbf,
                                       device=str(self.device))
         R_l = self.model(inp_l).squeeze(-1)
 
@@ -1078,6 +1479,8 @@ class PINNTrainer:
         xr = np.full(n, cfg.x_max, dtype=np.float32)
         inp_r = self.norm.build_input(xr, yl, t_np, Q_np, vx_np, vy_np, D_np,
                                       N_agents=Na, dist_nearest=dn,
+                                      dist_dx=dn_dx, dist_dy=dn_dy,
+                                      distance_rbf=self.use_distance_rbf,
                                       device=str(self.device))
         R_r = self.model(inp_r).squeeze(-1)
 
@@ -1086,19 +1489,26 @@ class PINNTrainer:
         xt = np.random.uniform(cfg.x_min, cfg.x_max, n).astype(np.float32)
         inp_b = self.norm.build_input(xt, yb, t_np, Q_np, vx_np, vy_np, D_np,
                                       N_agents=Na, dist_nearest=dn,
+                                      dist_dx=dn_dx, dist_dy=dn_dy,
+                                      distance_rbf=self.use_distance_rbf,
                                       device=str(self.device))
         R_b = self.model(inp_b).squeeze(-1)
 
         yt = np.full(n, cfg.y_max, dtype=np.float32)
         inp_t = self.norm.build_input(xt, yt, t_np, Q_np, vx_np, vy_np, D_np,
                                       N_agents=Na, dist_nearest=dn,
+                                      dist_dx=dn_dx, dist_dy=dn_dy,
+                                      distance_rbf=self.use_distance_rbf,
                                       device=str(self.device))
         R_t = self.model(inp_t).squeeze(-1)
 
         return torch.mean(R_l**2) + torch.mean(R_r**2) + torch.mean(R_b**2) + torch.mean(R_t**2)
 
     def _smooth_loss(self):
-        samp = self._grid_sample_batch(max(128, self.n_co // 8))
+        samp = self._grid_sample_batch(
+            max(128, self.n_co // 8),
+            focus_fraction=0.25 * self.risk_sample_fraction,
+        )
         pred = self._forward_with_raw_coords(samp, compute_second_time=False)
         laplacian = pred['R_xx'] + pred['R_yy']
         q_norm = torch.tensor(samp['Q'] / max(self.norm.ranges['Q'][1], 1e-3),
@@ -1113,7 +1523,21 @@ class PINNTrainer:
                                 dtype=torch.float32, device=self.device)
         R_y_true = torch.tensor(samp['R_y_true'] / max(self.norm.ranges['R'][1], 1e-3),
                                 dtype=torch.float32, device=self.device)
-        return torch.mean((pred['R_x'] - R_x_true) ** 2 + (pred['R_y'] - R_y_true) ** 2)
+        component_error = (pred['R_x'] - R_x_true) ** 2 + (pred['R_y'] - R_y_true) ** 2
+        true_magnitude = torch.sqrt(R_x_true ** 2 + R_y_true ** 2)
+        weights = 1.0 + self.risk_loss_boost * torch.sqrt(torch.clamp(true_magnitude, min=0.0))
+        weights = weights / torch.clamp(torch.mean(weights), min=1e-6)
+        pred_magnitude = torch.sqrt(pred['R_x'] ** 2 + pred['R_y'] ** 2)
+        active = true_magnitude > 1e-4
+        if torch.any(active):
+            cosine = (
+                pred['R_x'][active] * R_x_true[active]
+                + pred['R_y'][active] * R_y_true[active]
+            ) / torch.clamp(pred_magnitude[active] * true_magnitude[active], min=1e-6)
+            direction_error = torch.mean(1.0 - torch.clamp(cosine, -1.0, 1.0))
+        else:
+            direction_error = torch.tensor(0.0, device=self.device)
+        return torch.mean(weights * component_error) + 0.10 * direction_error
 
     def _temporal_loss(self):
         samp = self._grid_sample_batch(max(256, self.n_co // 8), require_next=True)
@@ -1145,7 +1569,9 @@ class PINNTrainer:
         R_next_pred = pred['R'] + dt_t * rhs
         R_next_true = torch.tensor(samp['R_next'] / max(self.norm.ranges['R'][1], 1e-3),
                                    dtype=torch.float32, device=self.device)
-        return torch.mean((R_next_pred - R_next_true) ** 2)
+        weights = 1.0 + self.risk_loss_boost * torch.sqrt(torch.clamp(R_next_true, min=0.0))
+        weights = weights / torch.clamp(torch.mean(weights), min=1e-6)
+        return torch.mean(weights * (R_next_pred - R_next_true) ** 2)
 
     def _behavior_longitudinal_loss(self):
         idx = self.rng.integers(0, len(self.snaps), size=max(64, self.n_da // 16))
@@ -1209,17 +1635,23 @@ class PINNTrainer:
         vy_flat = snap['vy'].ravel().astype(np.float32)
         D_flat  = snap['D'].ravel().astype(np.float32)
 
-        Na_flat = dn_flat = None
+        Na_flat = dn_flat = dn_dx_flat = dn_dy_flat = None
         if self.use_context:
             Na_flat = np.full_like(x_flat, float(snap.get('N_agents', 0)))
             dn      = snap.get('dist_nearest', None)
             dn_flat = (dn.ravel().astype(np.float32)
                        if dn is not None
                        else np.full_like(x_flat, _PERCEPTION_RANGE_DEFAULT))
+            if self.use_spatial_context and dn is not None:
+                dn_dy, dn_dx = np.gradient(dn, self.dy, self.dx)
+                dn_dx_flat = dn_dx.ravel().astype(np.float32)
+                dn_dy_flat = dn_dy.ravel().astype(np.float32)
 
         inp = self.norm.build_input(
             x_flat, y_flat, t_flat, Q_flat, vx_flat, vy_flat, D_flat,
             N_agents=Na_flat, dist_nearest=dn_flat,
+            dist_dx=dn_dx_flat, dist_dy=dn_dy_flat,
+            distance_rbf=self.use_distance_rbf,
             device=str(self.device))
 
         self.model.eval()
@@ -1230,7 +1662,8 @@ class PINNTrainer:
         return (R_norm * R_scale).reshape(ny, nx)
 
     def predict_field_from_arrays(self, X, Y, t_val, Q, vx, vy, D,
-                                  N_agents=None, dist_nearest=None):
+                                  N_agents=None, dist_nearest=None,
+                                  dist_dx=None, dist_dy=None):
         """
         Predict risk field at arbitrary grid arrays.
 
@@ -1256,17 +1689,26 @@ class PINNTrainer:
         vy_flat = vy.ravel().astype(np.float32)
         D_flat  = D.ravel().astype(np.float32)
 
-        Na_flat = dn_flat = None
+        Na_flat = dn_flat = dn_dx_flat = dn_dy_flat = None
         if self.use_context:
             Na_flat = (np.full_like(x_flat, float(N_agents))
                        if N_agents is not None else np.zeros_like(x_flat))
             dn_flat = (dist_nearest.ravel().astype(np.float32)
                        if dist_nearest is not None
                        else np.full_like(x_flat, _PERCEPTION_RANGE_DEFAULT))
+            if self.use_spatial_context and dist_nearest is not None:
+                grid_dy = float(np.mean(np.diff(Y[:, 0]))) if Y.shape[0] > 1 else 1.0
+                grid_dx = float(np.mean(np.diff(X[0, :]))) if X.shape[1] > 1 else 1.0
+                if dist_dx is None or dist_dy is None:
+                    dist_dy, dist_dx = np.gradient(dist_nearest, grid_dy, grid_dx)
+                dn_dx_flat = np.asarray(dist_dx, dtype=np.float32).ravel()
+                dn_dy_flat = np.asarray(dist_dy, dtype=np.float32).ravel()
 
         inp = self.norm.build_input(
             x_flat, y_flat, t_flat, Q_flat, vx_flat, vy_flat, D_flat,
             N_agents=Na_flat, dist_nearest=dn_flat,
+            dist_dx=dn_dx_flat, dist_dy=dn_dy_flat,
+            distance_rbf=self.use_distance_rbf,
             device=str(self.device))
 
         self.model.eval()
@@ -1289,10 +1731,20 @@ class PINNTrainer:
             'rff_scale'   : (float(self.model.rff.B.std())
                              if self.model.use_rff else 10.0),
             'use_context'      : self.model.use_context,
+            'use_spatial_context': getattr(self.model, 'use_spatial_context', False),
+            'use_distance_rbf'   : getattr(self.model, 'use_distance_rbf', False),
+            'rff_include_raw'  : getattr(self.model, 'rff_include_raw', False),
+            'output_bias_init' : getattr(self.model, 'output_bias_init', 0.0),
             'perception_range' : ExiDLoader.PERCEPTION_RANGE,
             'selection_mode'   : getattr(self, 'selection_mode', 'soft_topk'),
             'top_k'            : getattr(self, 'top_k', 5),
             'threshold_ratio'  : getattr(self, 'threshold_ratio', 0.15),
+            'risk_sample_fraction': getattr(self, 'risk_sample_fraction', 0.0),
+            'risk_loss_boost'     : getattr(self, 'risk_loss_boost', 0.0),
+            'risk_halo_boost'     : getattr(self, 'risk_halo_boost', 0.0),
+            'metadata'         : dict(getattr(self, 'checkpoint_metadata', {})),
+            'optimizer_state'  : getattr(self, '_optimizer_state', None),
+            'scheduler_state'  : getattr(self, '_scheduler_state', None),
         }, path)
         print(f"[Phase2] Model saved → {path}")
 
@@ -1301,6 +1753,10 @@ class PINNTrainer:
         self.model.load_state_dict(ckpt['model_state'])
         if 'history' in ckpt:
             self.history = ckpt['history']
+        if 'metadata' in ckpt:
+            self.checkpoint_metadata = dict(ckpt['metadata'])
+        self._optimizer_state = ckpt.get('optimizer_state')
+        self._scheduler_state = ckpt.get('scheduler_state')
         print(f"[Phase2] Model loaded ← {path}")
 
 
@@ -1430,7 +1886,7 @@ class PINNValidator:
                 # ---- panel 1: Numerical PDE ----
                 ax0 = fig.add_subplot(gs[0])
                 im0 = ax0.imshow(R_num, origin='lower', aspect='auto',
-                                 extent=extent, vmin=0, vmax=vmax, cmap='inferno')
+                                 extent=extent, vmin=0, vmax=vmax, cmap='turbo')
                 ax0.set_title(r'Numerical PDE  ($t={:.1f}$ s)'.format(snap['t']))
                 ax0.set_xlabel(f'$x$ [{unit}]')
                 ax0.set_ylabel(f'$y$ [{unit}]')
@@ -1441,7 +1897,7 @@ class PINNValidator:
                 # ---- panel 2: PINN ----
                 ax1 = fig.add_subplot(gs[1])
                 im1 = ax1.imshow(R_pinn, origin='lower', aspect='auto',
-                                 extent=extent, vmin=0, vmax=vmax, cmap='inferno')
+                                 extent=extent, vmin=0, vmax=vmax, cmap='turbo')
                 ax1.set_title(r'PINN Surrogate')
                 ax1.set_xlabel(f'$x$ [{unit}]')
                 ax1.set_ylabel(f'$y$ [{unit}]')

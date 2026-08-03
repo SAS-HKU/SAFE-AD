@@ -50,7 +50,7 @@ class DRIFTInterface:
         last_Q: Last computed source term (for debugging)
     """
 
-    def __init__(self, path_funcs=None):
+    def __init__(self, path_funcs=None, sim_cfg=None):
         """
         Initialize the DRIFT interface.
 
@@ -58,14 +58,15 @@ class DRIFTInterface:
             path_funcs: Dict of path objects for Frenet conversion
                         {0: path_left, 1: path_center, 2: path_right}
         """
-        self.solver = PDESolver()
+        self.config = sim_cfg or cfg
+        self.solver = PDESolver(config=self.config)
         self.path_funcs = path_funcs or {}
 
         # Grid info from config
-        self.X, self.Y = cfg.X, cfg.Y
-        self.x_grid = cfg.x
-        self.y_grid = cfg.y
-        self.dx, self.dy = cfg.dx, cfg.dy
+        self.X, self.Y = self.config.X, self.config.Y
+        self.x_grid = self.config.x
+        self.y_grid = self.config.y
+        self.dx, self.dy = self.config.dx, self.config.dy
 
         # Interpolators (updated after each step)
         self._interpolator = None
@@ -108,7 +109,7 @@ class DRIFTInterface:
         self.last_vy = None
 
     def warmup(self, vehicles, ego, dt=0.1, duration=5.0, substeps=3,
-               source_fn=None):
+               source_fn=None, velocity_fn=None, diffusion_fn=None):
         """
         Warm up risk field by pre-evolving PDE to quasi-equilibrium.
 
@@ -125,6 +126,12 @@ class DRIFTInterface:
             source_fn: Optional callable replacing compute_total_Q.
                        Signature: source_fn(vehicles, ego, X, Y)
                        Returns (Q_total, Q_veh, Q_occ, occ_mask).
+            velocity_fn: Optional callable replacing compute_velocity_field.
+                         It receives (vehicles, ego, X, Y) and may return
+                         either (vx, vy) or the standard six-value output.
+            diffusion_fn: Optional callable replacing compute_diffusion_field.
+                          Signature: diffusion_fn(occ_mask, X, Y, vehicles,
+                          ego), returning a diffusion field.
 
         Returns:
             final_risk: Risk field after warm-up
@@ -136,7 +143,8 @@ class DRIFTInterface:
             # Evolve PDE with current vehicle configuration
             # (vehicles are static during warm-up)
             _ = self.step(vehicles, ego, dt=dt, substeps=substeps,
-                          source_fn=source_fn)
+                          source_fn=source_fn, velocity_fn=velocity_fn,
+                          diffusion_fn=diffusion_fn)
 
             # Progress indicator
             if (i + 1) % max(1, n_steps // 5) == 0:
@@ -151,7 +159,8 @@ class DRIFTInterface:
 
         return self.solver.R.copy()
 
-    def step(self, vehicles, ego, dt=0.1, substeps=3, source_fn=None):
+    def step(self, vehicles, ego, dt=0.1, substeps=3, source_fn=None,
+             velocity_fn=None, diffusion_fn=None):
         """
         Advance the PDE one timestep.
 
@@ -165,6 +174,12 @@ class DRIFTInterface:
                        Signature: source_fn(vehicles, ego, X, Y)
                        Returns (Q_total, Q_veh, Q_occ, occ_mask).
                        When None (default) the standard GVF formulation is used.
+            velocity_fn: Optional callable replacing compute_velocity_field.
+                         It receives (vehicles, ego, X, Y) and may return
+                         either (vx, vy) or the standard six-value output.
+            diffusion_fn: Optional callable replacing compute_diffusion_field.
+                          Signature: diffusion_fn(occ_mask, X, Y, vehicles,
+                          ego), returning a diffusion field.
 
         Returns:
             R: Updated risk field (2D array on cfg.X, cfg.Y grid)
@@ -172,7 +187,7 @@ class DRIFTInterface:
         # Compute source terms Q(x,t)
         if source_fn is None:
             Q_total, Q_veh, Q_occ, occ_mask = compute_total_Q(
-                vehicles, ego, self.X, self.Y
+                vehicles, ego, self.X, self.Y, config=self.config
             )
         else:
             Q_total, Q_veh, Q_occ, occ_mask = source_fn(
@@ -181,13 +196,29 @@ class DRIFTInterface:
         self.last_Q = Q_total
 
         # Compute velocity field for advection
-        vx, vy, vx_flow, vy_flow, vx_topo, vy_topo = compute_velocity_field(
-            vehicles, ego, self.X, self.Y
-        )
+        if velocity_fn is None:
+            velocity_output = compute_velocity_field(
+                vehicles, ego, self.X, self.Y, config=self.config
+            )
+        else:
+            velocity_output = velocity_fn(vehicles, ego, self.X, self.Y)
+        if len(velocity_output) == 2:
+            vx, vy = velocity_output
+        elif len(velocity_output) == 6:
+            vx, vy, _, _, _, _ = velocity_output
+        else:
+            raise ValueError(
+                "velocity_fn must return (vx, vy) or the standard six-value output"
+            )
         self.last_vx, self.last_vy = vx, vy
 
         # Compute spatially-varying diffusion coefficient (with braking-enhanced diffusion)
-        D = compute_diffusion_field(occ_mask, self.X, self.Y, vehicles, ego)
+        if diffusion_fn is None:
+            D = compute_diffusion_field(
+                occ_mask, self.X, self.Y, vehicles, ego, config=self.config
+            )
+        else:
+            D = diffusion_fn(occ_mask, self.X, self.Y, vehicles, ego)
         self.last_D = D
 
         # Advance PDE with sub-stepping for stability

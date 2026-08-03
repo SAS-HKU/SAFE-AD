@@ -1,0 +1,261 @@
+# Prospective PINN Validation and Policy-Backend Swap
+
+This workflow keeps three questions separate:
+
+1. Does the numerical field rank future interaction occupancy better than its
+   instantaneous source?
+2. Does a recording-disjoint, context-conditioned PINN preserve that field?
+3. Does replacing the numerical backend with the PINN preserve the actions and
+   closed-loop outcomes of one fixed field-observing policy?
+
+The PINN is accepted as a deployment backend only if all three checks pass.
+Existing paper checkpoints are not overwritten.
+
+## 0. Build the restorable source caches
+
+Naturalistic inD data are read from `data/inD` and split by recording before
+any normalization or training. The cache stage stores the instantaneous source,
+transport, diffusion, road mask, scene descriptors, and provenance manifest.
+
+```powershell
+python -m rl.train_context_pinn --stage cache `
+  --dataset inD --data-root data `
+  --calibration-recordings 01,02,03,04,05 `
+  --heldout-recordings 06,07,08,09,10,11 `
+  --cache-dir evaluation/pinn_teacher_cache `
+  --max-sec 44 --warmup-sec 4 --deployment-horizon 40
+
+python -m rl.cache_highwayenv_pinn_teacher `
+  --env-ids highway-v0 merge-v0 roundabout-v0 intersection-v0 `
+  --seeds 0:5 --traffic-preset medium --max-steps 40 `
+  --cache-dir evaluation/pinn_highway_teacher_cache
+
+python -m rl.cache_highwayenv_pinn_teacher `
+  --env-ids highway-v0 merge-v0 roundabout-v0 intersection-v0 `
+  --seeds 100:103 --traffic-preset medium --max-steps 40 `
+  --cache-dir evaluation/pinn_highway_teacher_cache
+```
+
+Dataset files and generated caches are excluded from Git. Each completed cache
+contains a manifest and memory-mappable arrays so interrupted training can be
+restarted without recomputing the teacher.
+
+## 1. Cache the causal prospective teacher
+
+The teacher uses only the state available at the current sensing instant. It
+integrates source transport and diffusion over a 3 s horizon with 0.25 s
+quadrature steps. Future naturalistic trajectories are used later as labels,
+never as teacher inputs.
+
+```powershell
+python -m rl.build_prospective_pinn_cache `
+  --input-cache-globs `
+    "evaluation/pinn_teacher_cache/inD_*" `
+    "evaluation/pinn_highway_teacher_cache/highwayenv_*" `
+  --output-root evaluation/pinn_prospective_v2_cache `
+  --horizon-s 3 --integration-step-s 0.25 `
+  --decay-rate 0.25 --transport-scale 1 `
+  --x-min -40 --x-max 100 --nx 141 `
+  --y-min -20 --y-max 20 --ny 41
+```
+
+Completed caches are restored from their manifests. Use `--rebuild` only when
+the declared solver or grid has intentionally changed.
+
+## 2. Train the multi-recording, domain-conditioned PINN
+
+Calibration data comprise inD recordings 01-05 and HighwayEnv seeds 0-2 from
+highway, merge, intersection, and roundabout. Held-out evaluation uses inD
+06-11 and HighwayEnv seeds 100-102. Domain normalization is inferred only from
+the calibration split.
+
+```powershell
+python -m rl.train_prospective_context_pinn --stage all `
+  --calibration-cache-globs `
+    "evaluation/pinn_prospective_v2_cache/inD_0[1-5]" `
+    "evaluation/pinn_prospective_v2_cache/highwayenv_*_seed000[0-2]" `
+  --heldout-cache-globs `
+    "evaluation/pinn_prospective_v2_cache/inD_0[6-9]" `
+    "evaluation/pinn_prospective_v2_cache/inD_1[0-1]" `
+    "evaluation/pinn_prospective_v2_cache/highwayenv_*_seed010[0-2]" `
+  --output-dir evaluation/pinn_prospective_context_v3_domain_conditioned `
+  --model-out rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt `
+  --device cpu --torch-threads 2 --seed 2026 `
+  --steps 6000 --batch-size 8 --crop-width 128 `
+  --risk-patch-fraction 0.65 --width 16 `
+  --dilations 1,2,4,8,16,1 --lr 0.0008 `
+  --hotspot-boost 4 --w-field 1 --w-gradient 0.30 `
+  --w-physics 0.002 --validation-frames 50
+```
+
+## 3. Validate future occupancy and numerical fidelity
+
+```powershell
+python -m rl.evaluate_prospective_field_validity `
+  --dataset inD --data-root data `
+  --cache-root evaluation/pinn_prospective_v2_cache `
+  --recordings 06,07,08,09,10,11 `
+  --horizon-s 3 --sample-step-s 0.2 --frame-stride 10 `
+  --pinn-checkpoint rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt `
+  --device cpu --bootstrap 5000 `
+  --output-dir evaluation/prospective_field_validity_pinn_v3
+
+python -m rl.plot_prospective_pinn_validation `
+  --validity-dir evaluation/prospective_field_validity_pinn_v3 `
+  --fidelity-dir evaluation/pinn_prospective_context_v3_domain_conditioned `
+  --output evaluation/pinn_prospective_v3_paper/pinn_validity_runtime
+```
+
+Report recording-bootstrap confidence intervals for future-occupancy AUROC and
+AUPRC. Field RMSE, correlation, gradient angle, hotspot overlap, and timing are
+diagnostic quantities; cached frames are not treated as independent samples.
+
+## 4. Train a policy that actually observes the field
+
+The stock flattened observation has 25 entries. `--append-risk-obs true`
+appends eight field descriptors, yielding the 33-D policy required for a valid
+backend swap.
+
+```powershell
+python -m rl.train_highwayenv_social_sb3 `
+  --algo ppo --env-id merge-v0 --eval-env-id merge-v0 `
+  --interface stock --action-mode continuous `
+  --reward-config rl/config/social_reward_v1.json --ablation A5 `
+  --use-drift true --append-risk-obs true `
+  --field-backend prospective `
+  --pinn-checkpoint rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt `
+  --traffic-preset medium --total-steps 20000 `
+  --eval-freq 4000 --eval-episodes 3 --eval-max-steps 600 `
+  --n-envs 2 --seed 2026 `
+  --run-dir rl/logs/revision_merge_ppo_continuous_fieldobs33_prospective_v3_20k_bounded `
+  --device cpu
+```
+
+`merge-v0` does not impose a native time truncation in every installed
+HighwayEnv version. The explicit 600-step bound is therefore part of the
+evaluation protocol, not an early-stopping optimization.
+
+## 5. Run the actual teacher-to-PINN swap
+
+```powershell
+python -m rl.eval_highwayenv_backend_swap_sb3 `
+  --algo ppo `
+  --policy-checkpoint `
+    rl/checkpoints/highwayenv/prospective_merge_ppo_20k/best_model.zip `
+  --pinn-checkpoint `
+    rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt `
+  --env-id merge-v0 --action-mode continuous --ablation A5 `
+  --traffic-preset medium --seeds 100:110 --pinn-device cpu `
+  --max-episode-steps 600 --bootstrap 5000 `
+  --output-dir evaluation/highwayenv_prospective_pinn_backend_swap_v3
+```
+
+The evaluator first keeps both simulators on the teacher trajectory and
+compares field descriptors and counterfactual actions at identical states. It
+then runs paired closed-loop episodes with either backend. Report policy
+inference, field backend, environment stepping, and rendering separately.
+
+### Runtime decomposition
+
+Run the numerical solver and PINN on the same held-out ego-local coefficient
+snapshots. The generated table separates context construction, neural/PDE
+kernel, device transfer, and complete field-core latency at batch size one.
+
+```powershell
+python -m rl.benchmark_prospective_field_runtime `
+  --cache-globs `
+    "evaluation/pinn_prospective_v2_cache/highwayenv_merge_v0_seed010*" `
+  --checkpoint `
+    rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt `
+  --devices cpu cuda --frames-per-recording 20 `
+  --torch-threads 2 `
+  --output-dir evaluation/pinn_prospective_runtime_v3
+```
+
+The field-core benchmark starts after ego-local scene conditioning. The
+closed-loop backend-swap table remains the authoritative online latency test.
+Do not combine either value with rendering time or one-time model loading.
+
+For a stage-resolved online check without policy or rendering cost, run:
+
+```powershell
+python -m rl.benchmark_highwayenv_field_backend_online `
+  --env-id merge-v0 --traffic-preset medium --seeds 100:103 `
+  --devices cpu cuda --steps 40 --discard-first 5 `
+  --checkpoint `
+    rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt `
+  --output-dir evaluation/pinn_prospective_runtime_online_v3
+```
+
+## 6. Generate blue-to-red BEV animations
+
+```powershell
+python -m rl.visualize_dataset_pinn_gif `
+  --dataset inD --recording 06 --data-root data `
+  --cache-root evaluation/pinn_prospective_v2_cache `
+  --checkpoint rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt `
+  --frames 60 --stride 4 --fps 8 `
+  --output evaluation/pinn_prospective_v3_gifs/inD06_teacher_vs_pinn.gif
+
+python -m rl.visualize_highwayenv_pinn_swap_gif `
+  --env-id merge-v0 --planner idm `
+  --action-mode default `
+  --pinn-checkpoint `
+    rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt `
+  --teacher-backend prospective --append-risk-obs false `
+  --traffic-preset medium --seed 100 --frames 40 --fps 6 `
+  --snapshot-index 8 --stop-on-offroad true `
+  --output evaluation/pinn_prospective_v3_gifs/merge_idm_teacher_vs_pinn.gif
+```
+
+The qualitative merge figure deliberately uses HighwayEnv's IDM ego on the
+standard merge road. It visualizes the numerical-to-PINN field replacement on
+a lane-valid car-following/merging trajectory and is not presented as an RL
+performance result. The separate backend-swap evaluation above remains the
+policy-level test. This separation prevents an unstable policy trajectory
+from being misinterpreted as a field-model failure.
+
+Replace `merge-v0` with `roundabout-v0`, `intersection-v0`, or `highway-v0`
+for scenario-specific demonstrations. All overlays use the `turbo` blue-to-red
+scale: blue is low risk and red is high risk.
+
+## Acceptance rule
+
+Do not describe the PINN as a drop-in replacement if it fails independent
+future-occupancy validity, materially rotates held-out gradients, changes the
+frozen policy actions beyond the declared tolerance, or changes paired safety
+and progress outcomes. In that case, retain the numerical backend for policy
+results and report the PINN only as an approximation study.
+
+## Verified results from the accepted run
+
+The prospective teacher passes the independent construct-validity test on
+held-out inD recordings 06-11. Relative to the instantaneous-source control,
+it improves future-occupancy AUROC by 0.0848 (95% recording-bootstrap CI
+0.0627-0.1005) and AUPRC by 0.1669 (0.1440-0.1919). The frozen PINN retains
+gains of 0.0408 (0.0190-0.0576) and 0.0976 (0.0720-0.1207), respectively.
+
+Across held-out HighwayEnv frames, PINN-to-teacher correlation is 0.925 and
+the active-gradient angular error is 13.8 degrees. Merge is the strongest
+topology-specific result: correlation 0.977, gradient error 7.4 degrees, and
+equal-mass hotspot IoU 0.854. Roundabout remains the weakest case because many
+held-out frames contain an almost zero teacher field; report its background
+false-risk level alongside overlap rather than interpreting IoU alone.
+
+The actual merge backend swap uses one frozen 33-D continuous PPO policy and
+ten paired held-out traffic seeds. Synchronized replay gives descriptor RMSE
+0.0047, mean action-vector error 6.68e-5, and no action error above 0.05. Both
+closed-loop backends complete all ten episodes without collision; the
+PINN-minus-teacher progress difference is -0.061 m (95% paired-bootstrap CI
+-0.076 to -0.046 m) over approximately 586 m.
+
+The stage-resolved timing result does **not** support an unconditional
+end-to-end acceleration claim. On paired held-out merge fields after ego-local
+conditioning, CUDA PINN requires 2.04 ms versus 2.64 ms for numerical
+propagation. Once online source construction, reprojection, context generation,
+transfer, and interpolation are included, the corresponding totals are 5.80
+and 5.21 ms in the concurrent-load diagnostic. CUDA therefore accelerates the
+learned operator but does not yet make the complete batch-size-one backend
+faster. Use the table and raw summaries in
+`docs/reproducibility/pinn_prospective_v3/`, and rerun them on an idle GPU before
+reporting final hardware latency.

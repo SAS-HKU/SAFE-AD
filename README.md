@@ -100,47 +100,52 @@ Outputs are schema-v4 `.npz` files containing per-frame ego/neighbor states, lan
 
 ## PINN Risk-Field Training and Validation
 
-The PINN is a differentiable surrogate of the PDE-governed propagated risk field (`pde_solver.py`). It is trained on the PDE-generated field as a teacher and on multi-dataset scenes.
+SAFE-AD now releases the recording-disjoint **prospective context PINN** used in
+the revision experiments. Its teacher is a causal 3 s transport-diffusion
+operator that uses only the scene available at the current sensing instant.
+The surrogate receives a 17-channel ego-local context tensor containing source,
+transport, diffusion, road, occupancy, distance, and domain information, and
+returns the complete propagated field on a `41 x 141` grid.
 
 ![PINN graph](assests/SAFE-AD-PINN.jpg)
 
-### Train PINN surrogate
+### Released checkpoint
+
+The accepted checkpoint is
+[`rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt`](rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt).
+Its SHA-256, split, architecture, intended use, and limitations are recorded in
+the adjacent [model card](rl/checkpoints/pinn/MODEL_CARD.md).
+The fixed 33-D merge policy used only for backend-swap reproducibility is also
+released at
+[`rl/checkpoints/highwayenv/prospective_merge_ppo_20k/best_model.zip`](rl/checkpoints/highwayenv/prospective_merge_ppo_20k/best_model.zip).
+
+### Reproduce the pipeline
+
+The complete commands are in
+[`docs/pinn_multirecord_backend_commands.md`](docs/pinn_multirecord_backend_commands.md).
+The workflow explicitly separates teacher construction, PINN fidelity, and a
+fixed-policy backend swap:
 
 ```bash
-# Single-dataset (highway)
-python pinn_highway_train.py \
-  --out pinn_highway.pt
-
-# Multi-dataset / multi-scene
-python pinn_risk_field.py train \
-  --datasets highD,inD,rounD,exiD \
-  --epochs 200 \
-  --out pinn_multi_all.pt
-
-# Fine-tune from an existing checkpoint
-python pinn_risk_field.py finetune \
-  --init pinn_multi_all.pt --dataset rounD --epochs 50 \
-  --out pinn_rounD_new.pt
+# Verify the released model and paired field-core runtime.
+python -m rl.benchmark_prospective_field_runtime \
+  --cache-globs "evaluation/pinn_prospective_v2_cache/highwayenv_merge_v0_seed010*" \
+  --checkpoint rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt \
+  --devices cpu cuda --frames-per-recording 20
 ```
 
-Released checkpoints at the repository root: `pinn_highway.pt`, `pinn_inD_all.pt`, `pinn_rounD_all.pt`, `pinn_exiD_00.pt`, `pinn_multi_all.pt`, `pinn_risk_field.pt`.
+Kernel-only latency is not reported as policy inference latency. The supplied
+benchmark separates context construction, device transfer, neural/PDE kernel,
+post-processing, complete field-backend time, and environment-step time. CUDA
+improves the neural component, while the current online implementation remains
+limited by CPU scene conditioning; the supported claim is behavioral
+interchangeability rather than an unconditional speedup.
 
-### Validate / compare against the numerical PDE
+The qualitative merge comparison uses HighwayEnv's lane-valid IDM ego on the
+standard merge road. It visualizes the field backend only; RL policy outcomes
+are evaluated separately by the paired backend-swap command.
 
-```bash
-# Field-by-field comparison: numerical PDE vs PINN, several scenarios
-python pinn_compare_fields.py \
-  --pinn pinn_multi_all.pt \
-  --scenarios highway,merge,roundabout,intersection \
-  --out figsave_PINN_compare
-
-# Per-scene quantitative comparison (relative L2, gradient error, PDE residual)
-python pinn_scene_compare.py \
-  --pinn pinn_multi_all.pt --datasets inD,rounD \
-  --out figsave_PINN_scene_compare
-```
-
-See [`PINN-finetune.md`](PINN-finetune.md) and [`IMPLEMENTATION_GUIDE_PINN_Improvements.md`](IMPLEMENTATION_GUIDE_PINN_Improvements.md) for fine-tuning recipes and ablations.
+![Lane-valid numerical and PINN merge fields](assests/merge_normal_pinn_teacher.png)
 
 ---
 
