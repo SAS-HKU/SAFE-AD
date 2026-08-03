@@ -22,3 +22,5 @@ typing_extensions==4.15.0
 protobuf==6.33.6
 opencv-python==4.13.0.92
 rich==15.0.0
+Pillow>=10.0
+pytest>=8.0

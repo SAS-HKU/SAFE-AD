@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
+import importlib
+import io
 import json
 import os
 import sys
 import time
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import numpy as np
+import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HIGHWAYENV_ROOT = REPO_ROOT / "HighwayEnv-master"
@@ -22,6 +27,7 @@ from rl.utils.typing_compat import ensure_typing_extensions_compat
 
 ensure_typing_extensions_compat()
 from stable_baselines3 import DDPG, DQN, PPO, SAC, TD3
+import gymnasium as gym
 
 from rl.env.highwayenv_social_env import (
     load_reward_config,
@@ -55,6 +61,8 @@ class EpisodeMetrics:
     risk_flux_mean: float
     mean_action_selection_ms: float
     p95_action_selection_ms: float
+    mean_field_backend_ms: float
+    p95_field_backend_ms: float
     reward_terms_mean: dict[str, float]
 
 
@@ -73,23 +81,110 @@ def _checkpoint_file(path: str) -> str:
     return str(path) if str(path).endswith(".zip") else f"{path}.zip"
 
 
+def _model_observation(model, observation) -> np.ndarray:
+    value = np.asarray(observation, dtype=np.float32)
+    expected = tuple(model.observation_space.shape)
+    if value.shape == expected:
+        return value
+    if value.size != int(np.prod(expected)):
+        raise ValueError(
+            f"Checkpoint expects observation shape {expected}; environment returned {value.shape}"
+        )
+    return value.reshape(expected)
+
+
+def _ppo_action_space_from_state(state: dict[str, torch.Tensor]):
+    action_dim = int(state["action_net.weight"].shape[0])
+    if "log_std" in state:
+        return gym.spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(action_dim,),
+            dtype=np.float32,
+        )
+    return gym.spaces.Discrete(action_dim)
+
+
 def load_sb3_model(algo: str, checkpoint: str):
+    # Checkpoints produced under NumPy 2.x may contain this private module
+    # path. NumPy 1.26 exposes the same objects through the legacy path.
+    try:
+        importlib.import_module("numpy._core.numeric")
+    except ModuleNotFoundError:
+        sys.modules.setdefault(
+            "numpy._core.numeric", importlib.import_module("numpy.core.numeric")
+        )
     algo = str(algo).strip().lower()
     path = _checkpoint_file(checkpoint)
+    custom_objects = None
+    try:
+        with zipfile.ZipFile(path) as archive:
+            state = torch.load(
+                io.BytesIO(archive.read("policy.pth")),
+                map_location="cpu",
+                weights_only=False,
+        )
+        if algo == "ppo":
+            obs_dim = int(state["mlp_extractor.policy_net.0.weight"].shape[1])
+            action_space = _ppo_action_space_from_state(state)
+        elif algo == "dqn":
+            obs_dim = int(state["q_net.q_net.0.weight"].shape[1])
+            q_weights = [
+                value
+                for key, value in state.items()
+                if key.startswith("q_net.q_net.") and key.endswith(".weight")
+            ]
+            action_space = gym.spaces.Discrete(int(q_weights[-1].shape[0]))
+        else:
+            obs_dim = 0
+            action_space = None
+        if obs_dim and action_space is not None:
+            custom_objects = {
+                "observation_space": gym.spaces.Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=(obs_dim,),
+                    dtype=np.float32,
+                ),
+                "action_space": action_space,
+                "_last_obs": None,
+                "_last_episode_starts": None,
+                "ep_info_buffer": deque(maxlen=100),
+                "ep_success_buffer": deque(maxlen=100),
+            }
+    except (KeyError, OSError, RuntimeError, zipfile.BadZipFile):
+        custom_objects = None
     if algo == "ppo":
-        return PPO.load(path, device="cpu")
+        return PPO.load(path, custom_objects=custom_objects, device="cpu")
     if algo == "dqn":
-        return DQN.load(path, device="cpu")
+        return DQN.load(path, custom_objects=custom_objects, device="cpu")
     if algo == "sac":
-        return SAC.load(path, device="cpu")
+        return SAC.load(path, custom_objects=custom_objects, device="cpu")
     if algo == "td3":
-        return TD3.load(path, device="cpu")
+        return TD3.load(path, custom_objects=custom_objects, device="cpu")
     if algo == "ddpg":
-        return DDPG.load(path, device="cpu")
+        return DDPG.load(path, custom_objects=custom_objects, device="cpu")
     raise ValueError(f"Unsupported algo '{algo}'")
 
 
-def evaluate_episode(model, *, env_id: str, interface: str, traffic, reward_config, ablation: str, seed: int, use_drift: bool, action_mode: str) -> EpisodeMetrics:
+def evaluate_episode(
+    model,
+    *,
+    env_id: str,
+    interface: str,
+    traffic,
+    reward_config,
+    ablation: str,
+    seed: int,
+    use_drift: bool,
+    action_mode: str,
+    append_risk_obs: bool = False,
+    field_backend: str = "numerical",
+    pinn_checkpoint: str | None = None,
+    pinn_device: str = "cpu",
+    pinn_time_mode: str = "error",
+    max_steps: int = 600,
+) -> EpisodeMetrics:
     env = make_social_highwayenv_env(
         env_id=env_id,
         interface=interface,
@@ -98,25 +193,40 @@ def evaluate_episode(model, *, env_id: str, interface: str, traffic, reward_conf
         ablation=ablation,
         use_drift=use_drift,
         action_mode=action_mode,
+        append_risk_obs=append_risk_obs,
         record_risk_metrics=False,
+        field_backend=field_backend,
+        pinn_checkpoint=pinn_checkpoint,
+        pinn_device=pinn_device,
+        pinn_time_mode=pinn_time_mode,
     )
     obs, _info = env.reset(seed=seed)
     returns = 0.0
     steps = []
     action_selection_samples_ms: list[float] = []
+    field_backend_samples_ms: list[float] = []
     terminated = False
     truncated = False
-    while True:
+    horizon_reached = False
+    for decision_index in range(max(1, int(max_steps))):
         action_t0 = time.perf_counter()
-        action, _ = model.predict(obs, deterministic=True)
+        action, _ = model.predict(
+            _model_observation(model, obs),
+            deterministic=True,
+        )
         action_selection_samples_ms.append(1000.0 * (time.perf_counter() - action_t0))
         obs, reward, terminated, truncated, info = env.step(action)
         returns += float(reward)
         step = dict(info.get("social_step", {}))
         if step:
             steps.append(step)
+        if "field_backend_step_ms" in info:
+            field_backend_samples_ms.append(float(info["field_backend_step_ms"]))
         if terminated or truncated:
             break
+    else:
+        horizon_reached = True
+        truncated = True
     env.close()
 
     if not steps:
@@ -129,7 +239,7 @@ def evaluate_episode(model, *, env_id: str, interface: str, traffic, reward_conf
         episode_return=float(returns),
         episode_length=int(len(steps)),
         crashed=bool(max(row.get("collision", 0.0) for row in steps)),
-        truncated=bool(truncated),
+        truncated=bool(truncated or horizon_reached),
         progress=float(np.sum([row.get("progress_dx", 0.0) for row in steps])),
         mean_speed=float(np.mean([row.get("speed", 0.0) for row in steps])),
         mean_abs_accel=float(np.mean([abs(row.get("accel", 0.0)) for row in steps])),
@@ -147,6 +257,8 @@ def evaluate_episode(model, *, env_id: str, interface: str, traffic, reward_conf
         risk_flux_mean=float(np.mean([row.get("risk_flux_backward", 0.0) for row in steps])),
         mean_action_selection_ms=float(np.mean(action_selection_samples_ms)) if action_selection_samples_ms else 0.0,
         p95_action_selection_ms=float(np.percentile(action_selection_samples_ms, 95)) if action_selection_samples_ms else 0.0,
+        mean_field_backend_ms=float(np.mean(field_backend_samples_ms)) if field_backend_samples_ms else 0.0,
+        p95_field_backend_ms=float(np.percentile(field_backend_samples_ms, 95)) if field_backend_samples_ms else 0.0,
         reward_terms_mean={
             key: float(np.mean([row.get(key, 0.0) for row in steps]))
             for key in reward_keys
@@ -182,6 +294,8 @@ def summarize_eval(episodes: list[EpisodeMetrics]) -> dict[str, object]:
         "risk_flux_mean": float(np.mean([ep.risk_flux_mean for ep in episodes])),
         "mean_action_selection_ms": float(np.mean([ep.mean_action_selection_ms for ep in episodes])),
         "p95_action_selection_ms": float(np.mean([ep.p95_action_selection_ms for ep in episodes])),
+        "mean_field_backend_ms": float(np.mean([ep.mean_field_backend_ms for ep in episodes])),
+        "p95_field_backend_ms": float(np.mean([ep.p95_field_backend_ms for ep in episodes])),
         "reward_terms_mean": {
             key: float(np.mean([ep.reward_terms_mean.get(key, 0.0) for ep in episodes]))
             for key in reward_keys
@@ -201,6 +315,12 @@ def evaluate_model(
     episodes: int,
     use_drift: bool,
     action_mode: str = "default",
+    append_risk_obs: bool = False,
+    field_backend: str = "numerical",
+    pinn_checkpoint: str | None = None,
+    pinn_device: str = "cpu",
+    pinn_time_mode: str = "error",
+    max_steps: int = 600,
 ) -> dict[str, dict[str, object]]:
     results = {}
     for env_id in env_ids:
@@ -215,6 +335,12 @@ def evaluate_model(
                 seed=seed,
                 use_drift=use_drift,
                 action_mode=action_mode,
+                append_risk_obs=append_risk_obs,
+                field_backend=field_backend,
+                pinn_checkpoint=pinn_checkpoint,
+                pinn_device=pinn_device,
+                pinn_time_mode=pinn_time_mode,
+                max_steps=max_steps,
             )
             for seed in range(int(episodes))
         ]
@@ -237,7 +363,27 @@ def main() -> None:
     parser.add_argument("--reward-config", default="rl/config/social_reward_v1.json")
     parser.add_argument("--ablation", default="full")
     parser.add_argument("--episodes", type=int, default=10)
+    parser.add_argument(
+        "--max-episode-steps",
+        type=int,
+        default=600,
+        help="Explicit evaluation horizon; required for scenarios without native time truncation.",
+    )
     parser.add_argument("--use-drift", type=_str2bool, default=True)
+    parser.add_argument(
+        "--append-risk-obs",
+        type=_str2bool,
+        default=False,
+        help="Append the 8-D field descriptor used for a true policy-backend swap.",
+    )
+    parser.add_argument(
+        "--field-backend",
+        choices=["numerical", "prospective", "pinn"],
+        default="numerical",
+    )
+    parser.add_argument("--pinn-checkpoint", default="")
+    parser.add_argument("--pinn-device", default="cpu")
+    parser.add_argument("--pinn-time-mode", choices=["error", "clip"], default="error")
     parser.add_argument("--traffic-preset", default="medium")
     parser.add_argument("--vehicles-count", type=int, default=None)
     parser.add_argument("--vehicles-density", type=float, default=None)
@@ -271,6 +417,9 @@ def main() -> None:
         "action_mode": args.action_mode,
         "ablation": args.ablation,
         "use_drift": bool(args.use_drift),
+        "append_risk_obs": bool(args.append_risk_obs),
+        "field_backend": args.field_backend if args.use_drift else "disabled",
+        "pinn_checkpoint": str(args.pinn_checkpoint),
         "traffic": traffic.to_dict(),
         "results": evaluate_model(
             model,
@@ -282,6 +431,12 @@ def main() -> None:
             episodes=args.episodes,
             use_drift=bool(args.use_drift),
             action_mode=args.action_mode,
+            append_risk_obs=bool(args.append_risk_obs),
+            field_backend=args.field_backend,
+            pinn_checkpoint=str(args.pinn_checkpoint).strip() or None,
+            pinn_device=args.pinn_device,
+            pinn_time_mode=args.pinn_time_mode,
+            max_steps=int(args.max_episode_steps),
         ),
     }
     if args.out:

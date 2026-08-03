@@ -25,29 +25,48 @@ Usage:
 """
 
 from .drift_interface import DRIFTInterface
-from .prideam_controller import PRIDEAMController, create_prideam_controller, RiskWeights
-from .visualization import (
-    plot_risk_field,
-    plot_risk_contours,
-    plot_risk_overlay,
-    plot_ego_with_risk,
-    plot_horizon_risk,
-    create_prideam_figure,
-    get_risk_cmap,
-)
 
-__all__ = [
-    'DRIFTInterface',
-    'PRIDEAMController',
-    'create_prideam_controller',
-    'RiskWeights',
-    'plot_risk_field',
-    'plot_risk_contours',
-    'plot_risk_overlay',
-    'plot_ego_with_risk',
-    'plot_horizon_risk',
-    'create_prideam_figure',
-    'get_risk_cmap',
-]
+__all__ = ['DRIFTInterface']
+
+# The public RL/PINN release does not require the synthetic MPC stack. Keep
+# those exports available when its optional dependencies are installed without
+# making a field-only import fail in a clean environment.
+try:
+    from .prideam_controller import (
+        PRIDEAMController,
+        RiskWeights,
+        create_prideam_controller,
+    )
+except ModuleNotFoundError:
+    pass
+else:
+    __all__.extend(
+        ['PRIDEAMController', 'create_prideam_controller', 'RiskWeights']
+    )
+
+try:
+    from .visualization import (
+        create_prideam_figure,
+        get_risk_cmap,
+        plot_ego_with_risk,
+        plot_horizon_risk,
+        plot_risk_contours,
+        plot_risk_field,
+        plot_risk_overlay,
+    )
+except ModuleNotFoundError:
+    pass
+else:
+    __all__.extend(
+        [
+            'plot_risk_field',
+            'plot_risk_contours',
+            'plot_risk_overlay',
+            'plot_ego_with_risk',
+            'plot_horizon_risk',
+            'create_prideam_figure',
+            'get_risk_cmap',
+        ]
+    )
 
 __version__ = '1.0.0'

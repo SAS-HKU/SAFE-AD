@@ -272,6 +272,77 @@ class StockTrafficWrapper(gym.Wrapper):
         return obs, info
 
 
+FIELD_OBSERVATION_KEYS = (
+    "r_ego",
+    "r_5m",
+    "r_10m",
+    "r_20m",
+    "grad_x",
+    "grad_y",
+    "r_left",
+    "r_right",
+)
+
+
+class HighwayRiskObservationWrapper(gym.Wrapper):
+    """Flatten the stock observation and append eight normalized field queries."""
+
+    def __init__(self, env: gym.Env, *, risk_clip: float = 5.0) -> None:
+        super().__init__(env)
+        if not isinstance(env.observation_space, gym.spaces.Box):
+            raise TypeError("Field observation augmentation requires a Box observation space")
+        self.risk_clip = float(max(risk_clip, 1e-6))
+        self.gradient_scale = float(max(self.risk_clip / 5.0, 0.1))
+        base_size = int(np.prod(env.observation_space.shape))
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(base_size + len(FIELD_OBSERVATION_KEYS),),
+            dtype=np.float32,
+        )
+
+    def _descriptor(self, info: dict[str, Any]) -> np.ndarray:
+        risk = [
+            float(info.get(key, 0.0)) / self.risk_clip
+            for key in FIELD_OBSERVATION_KEYS[:4]
+        ]
+        gradient = [
+            float(info.get(key, 0.0)) / self.gradient_scale
+            for key in FIELD_OBSERVATION_KEYS[4:6]
+        ]
+        side_risk = [
+            float(info.get(key, 0.0)) / self.risk_clip
+            for key in FIELD_OBSERVATION_KEYS[6:]
+        ]
+        return np.clip(
+            np.asarray([*risk, *gradient, *side_risk], dtype=np.float32),
+            -3.0,
+            3.0,
+        )
+
+    def _augment(self, observation, info: dict[str, Any]) -> np.ndarray:
+        base = np.asarray(observation, dtype=np.float32).reshape(-1)
+        descriptor = self._descriptor(info)
+        info["field_observation"] = descriptor.tolist()
+        return np.concatenate([base, descriptor]).astype(np.float32, copy=False)
+
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
+        observation, info = self.env.reset(seed=seed, options=options)
+        info = dict(info)
+        return self._augment(observation, info), info
+
+    def step(self, action):
+        observation, reward, terminated, truncated, info = self.env.step(action)
+        info = dict(info)
+        return (
+            self._augment(observation, info),
+            reward,
+            terminated,
+            truncated,
+            info,
+        )
+
+
 class HighwaySocialRewardWrapper(gym.Wrapper):
     def __init__(
         self,
@@ -648,6 +719,11 @@ def make_social_highwayenv_env(
     risk_clip: float | None = None,
     record_risk_metrics: bool = False,
     action_mode: str = "default",
+    append_risk_obs: bool = False,
+    field_backend: str = "numerical",
+    pinn_checkpoint: str | None = None,
+    pinn_device: str = "cpu",
+    pinn_time_mode: str = "error",
 ) -> gym.Env:
     traffic = traffic or resolve_traffic_config()
     reward_config = reward_config or DEFAULT_SOCIAL_REWARD_CONFIG
@@ -686,14 +762,24 @@ def make_social_highwayenv_env(
             risk_clip=risk_clip,
             record_risk_metrics=record_risk_metrics,
             gate_reward=False,
+            field_backend=field_backend,
+            pinn_checkpoint=pinn_checkpoint,
+            pinn_device=pinn_device,
+            pinn_time_mode=pinn_time_mode,
         )
     env = HighwaySocialRewardWrapper(
         env,
         reward_config=reward_config,
         ablation=ablation,
     )
+    if append_risk_obs:
+        if not use_drift:
+            raise ValueError("append_risk_obs requires use_drift=True")
+        env = HighwayRiskObservationWrapper(env, risk_clip=risk_clip)
     setattr(env, "env_id", env_id)
     setattr(env, "interface", interface)
     setattr(env, "action_mode", action_mode)
+    setattr(env, "append_risk_obs", bool(append_risk_obs))
+    setattr(env, "field_backend", field_backend if use_drift else "disabled")
     setattr(env, "traffic_config", traffic.to_dict())
     return env

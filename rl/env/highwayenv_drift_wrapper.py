@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import gymnasium as gym
@@ -21,10 +22,9 @@ from pde_solver import (
     compute_Q_vehicle,
     create_vehicle as drift_create_vehicle,
 )
-from Integration.drift_interface import DRIFTInterface
+from rl.risk.field_backend import FieldBackendTiming, make_field_backend
 
 
-_HIGHWAY_DRIFT_GRID_READY = False
 _DRIFT_NEIGHBOR_AHEAD_M = 85.0
 _DRIFT_NEIGHBOR_BEHIND_M = 35.0
 _DRIFT_NEIGHBOR_LATERAL_M = 14.0
@@ -66,23 +66,33 @@ _PDE_SUB_DT_TARGET = 0.04
 _PDE_CHUNK_DT_TARGET = 0.1
 
 
-def _configure_highwayenv_drift_grid() -> None:
-    global _HIGHWAY_DRIFT_GRID_READY
-    if _HIGHWAY_DRIFT_GRID_READY:
-        return
+def _config_snapshot() -> SimpleNamespace:
+    values: dict[str, Any] = {}
+    for name in dir(cfg):
+        if name.startswith("_"):
+            continue
+        value = getattr(cfg, name)
+        if callable(value):
+            continue
+        values[name] = np.array(value, copy=True) if isinstance(value, np.ndarray) else value
+    return SimpleNamespace(**values)
+
+
+def _default_highwayenv_drift_grid() -> SimpleNamespace:
+    local = _config_snapshot()
     # dx ~1.6 m, dy ~2.2 m — mirrors the IDEAM reference (config.py). With
     # dt/substeps ≈ 0.033 s and D_occ = 6 m²/s, these resolutions keep the
     # explicit PDE diffusion term well within CFL stability
     # (D*dt*(1/dx² + 1/dy²) ≈ 0.12 < 0.5). Finer dy blows up the field.
-    cfg.x_min, cfg.x_max = -80.0, 1080.0
-    cfg.y_min, cfg.y_max = -22.0, 26.0
-    cfg.nx, cfg.ny = 340, 22
-    cfg.dx = (cfg.x_max - cfg.x_min) / (cfg.nx - 1)
-    cfg.dy = (cfg.y_max - cfg.y_min) / (cfg.ny - 1)
-    cfg.x = np.linspace(cfg.x_min, cfg.x_max, cfg.nx)
-    cfg.y = np.linspace(cfg.y_min, cfg.y_max, cfg.ny)
-    cfg.X, cfg.Y = np.meshgrid(cfg.x, cfg.y)
-    _HIGHWAY_DRIFT_GRID_READY = True
+    local.x_min, local.x_max = -80.0, 1080.0
+    local.y_min, local.y_max = -22.0, 26.0
+    local.nx, local.ny = 340, 22
+    local.dx = (local.x_max - local.x_min) / (local.nx - 1)
+    local.dy = (local.y_max - local.y_min) / (local.ny - 1)
+    local.x = np.linspace(local.x_min, local.x_max, local.nx)
+    local.y = np.linspace(local.y_min, local.y_max, local.ny)
+    local.X, local.Y = np.meshgrid(local.x, local.y)
+    return local
 
 
 class DriftOverlayWrapper(gym.Wrapper):
@@ -96,15 +106,27 @@ class DriftOverlayWrapper(gym.Wrapper):
         risk_clip: float = 5.0,
         record_risk_metrics: bool = False,
         gate_reward: bool = True,
+        field_backend: str = "numerical",
+        pinn_checkpoint: str | None = None,
+        pinn_device: str = "cpu",
+        pinn_time_mode: str = "error",
     ) -> None:
         super().__init__(env)
-        _configure_highwayenv_drift_grid()
         self.use_drift = bool(use_drift)
         self.drift_warmup_s = float(max(0.0, drift_warmup_s))
         self.reward_gate_scale_r0 = float(max(1e-6, reward_gate_scale_r0))
         self.risk_clip = float(max(1e-6, risk_clip))
         self.record_risk_metrics = bool(record_risk_metrics)
         self.gate_reward = bool(gate_reward)
+        field_backend = str(field_backend).strip().lower()
+        if field_backend not in {"numerical", "prospective", "pinn"}:
+            raise ValueError(
+                "field_backend must be 'numerical', 'prospective', or 'pinn'"
+            )
+        self.field_backend = field_backend
+        self.pinn_checkpoint = pinn_checkpoint
+        self.pinn_device = str(pinn_device)
+        self.pinn_time_mode = str(pinn_time_mode)
         self.drift = None
         self._x_origin = 0.0
         self._overlay_cfg: dict[str, Any] = {}
@@ -112,6 +134,7 @@ class DriftOverlayWrapper(gym.Wrapper):
         self._episode_metrics: list[dict[str, float]] = []
         self._grid_X: np.ndarray | None = None
         self._grid_Y: np.ndarray | None = None
+        self._drift_cfg: SimpleNamespace | None = None
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         obs, info = self.env.reset(seed=seed, options=options)
@@ -123,10 +146,16 @@ class DriftOverlayWrapper(gym.Wrapper):
 
         raw = self._raw_env()
         self._x_origin = float(raw.vehicle.position[0]) - 20.0
-        self._configure_grid_for_env(raw)
+        self._drift_cfg = self._configure_grid_for_env(raw)
         self._capture_grid()
         self._overlay_cfg = self._resolve_overlay_config()
-        self.drift = DRIFTInterface()
+        self.drift = make_field_backend(
+            self.field_backend,
+            sim_cfg=self._drift_cfg,
+            pinn_checkpoint=self.pinn_checkpoint,
+            pinn_device=self.pinn_device,
+            pinn_time_mode=self.pinn_time_mode,
+        )
         self.drift.reset()
         self._road_mask = self._build_road_mask()
         if self._road_mask is not None:
@@ -220,9 +249,27 @@ class DriftOverlayWrapper(gym.Wrapper):
         back-projected to the mid-point of its sub-interval, giving a smooth
         source trace across the frame instead of a single 20-m teleport.
         """
+        if not bool(getattr(self.drift, "requires_temporal_substeps", True)):
+            self.drift.step(
+                vehicles,
+                ego,
+                dt=float(dt_env),
+                substeps=1,
+                source_fn=self._source_fn,
+            )
+            return
+
         n_chunks = self._pde_chunks(dt_env)
         chunk_dt = float(dt_env) / n_chunks
         substeps_per_chunk = self._pde_substeps(chunk_dt)
+        coefficient_ms = 0.0
+        context_ms = 0.0
+        transfer_in_ms = 0.0
+        kernel_ms = 0.0
+        transfer_out_ms = 0.0
+        postprocess_ms = 0.0
+        inference_ms = 0.0
+        total_ms = 0.0
         for k in range(n_chunks):
             # Back-project to the midpoint of chunk k (τ = (k + 0.5) * chunk_dt
             # measured from start-of-env-step).  End state is vehicles / ego
@@ -237,6 +284,25 @@ class DriftOverlayWrapper(gym.Wrapper):
                 substeps=substeps_per_chunk,
                 source_fn=self._source_fn,
             )
+            timing = self.drift.last_timing
+            coefficient_ms += float(timing.coefficient_ms)
+            context_ms += float(timing.context_ms)
+            transfer_in_ms += float(timing.transfer_in_ms)
+            kernel_ms += float(timing.kernel_ms)
+            transfer_out_ms += float(timing.transfer_out_ms)
+            postprocess_ms += float(timing.postprocess_ms)
+            inference_ms += float(timing.inference_ms)
+            total_ms += float(timing.total_ms)
+        self.drift.last_timing = FieldBackendTiming(
+            coefficient_ms=coefficient_ms,
+            context_ms=context_ms,
+            transfer_in_ms=transfer_in_ms,
+            kernel_ms=kernel_ms,
+            transfer_out_ms=transfer_out_ms,
+            postprocess_ms=postprocess_ms,
+            inference_ms=inference_ms,
+            total_ms=total_ms,
+        )
 
     @property
     def raw_env(self):
@@ -249,6 +315,9 @@ class DriftOverlayWrapper(gym.Wrapper):
         if not self.use_drift:
             return {
                 "r_ego": 0.0,
+                "r_5m": 0.0,
+                "r_10m": 0.0,
+                "r_20m": 0.0,
                 "r_fwd": 0.0,
                 "r_left": 0.0,
                 "r_right": 0.0,
@@ -275,6 +344,12 @@ class DriftOverlayWrapper(gym.Wrapper):
 
     def get_drift_grid(self) -> tuple[np.ndarray | None, np.ndarray | None]:
         return self._grid_X, self._grid_Y
+
+    def get_drift_config(self) -> SimpleNamespace | None:
+        return self._drift_cfg
+
+    def get_field_backend(self) -> str:
+        return str(self.field_backend)
 
     def lane_polygon(self, lane, *, margin: float = 0.0, n_samples: int = 96) -> np.ndarray:
         return self._lane_polygon(lane, margin=margin, n_samples=n_samples)
@@ -310,13 +385,12 @@ class DriftOverlayWrapper(gym.Wrapper):
     def _transform_xy(self, x: float, y: float) -> tuple[float, float]:
         return float(x - self._x_origin), float(y)
 
-    def _configure_grid_for_env(self, raw) -> None:
+    def _configure_grid_for_env(self, raw) -> SimpleNamespace:
         xs: list[float] = []
         ys: list[float] = []
         road = getattr(raw, "road", None)
         if road is None or not getattr(road, "network", None):
-            _configure_highwayenv_drift_grid()
-            return
+            return _default_highwayenv_drift_grid()
 
         for _from, to_dict in road.network.graph.items():
             for _to, lanes in to_dict.items():
@@ -330,8 +404,7 @@ class DriftOverlayWrapper(gym.Wrapper):
                             ys.append(float(y_t))
 
         if not xs or not ys:
-            _configure_highwayenv_drift_grid()
-            return
+            return _default_highwayenv_drift_grid()
 
         margin_x_m = 80.0   # large margin along x so ego doesn't fall near the sponge layer
         margin_y_m = 10.0
@@ -340,21 +413,25 @@ class DriftOverlayWrapper(gym.Wrapper):
         y_min = min(ys) - margin_y_m
         y_max = max(ys) + margin_y_m
 
-        cfg.x_min, cfg.x_max = float(x_min), float(x_max)
-        cfg.y_min, cfg.y_max = float(y_min), float(y_max)
+        local = _config_snapshot()
+        local.x_min, local.x_max = float(x_min), float(x_max)
+        local.y_min, local.y_max = float(y_min), float(y_max)
         # Use the IDEAM reference resolution (dx≈1.6 m, dy≈2.2 m) which keeps
         # the PDE stable under the default D_occ / dt combination.
-        cfg.nx = max(250, int((cfg.x_max - cfg.x_min) / _GRID_DX_REF) + 2)
-        cfg.ny = max(22, int((cfg.y_max - cfg.y_min) / _GRID_DY_REF) + 2)
-        cfg.dx = (cfg.x_max - cfg.x_min) / (cfg.nx - 1)
-        cfg.dy = (cfg.y_max - cfg.y_min) / (cfg.ny - 1)
-        cfg.x = np.linspace(cfg.x_min, cfg.x_max, cfg.nx)
-        cfg.y = np.linspace(cfg.y_min, cfg.y_max, cfg.ny)
-        cfg.X, cfg.Y = np.meshgrid(cfg.x, cfg.y)
+        local.nx = max(250, int((local.x_max - local.x_min) / _GRID_DX_REF) + 2)
+        local.ny = max(22, int((local.y_max - local.y_min) / _GRID_DY_REF) + 2)
+        local.dx = (local.x_max - local.x_min) / (local.nx - 1)
+        local.dy = (local.y_max - local.y_min) / (local.ny - 1)
+        local.x = np.linspace(local.x_min, local.x_max, local.nx)
+        local.y = np.linspace(local.y_min, local.y_max, local.ny)
+        local.X, local.Y = np.meshgrid(local.x, local.y)
+        return local
 
     def _capture_grid(self) -> None:
-        self._grid_X = np.array(cfg.X, copy=True)
-        self._grid_Y = np.array(cfg.Y, copy=True)
+        if self._drift_cfg is None:
+            raise RuntimeError("DRIFT grid is not configured")
+        self._grid_X = np.array(self._drift_cfg.X, copy=True)
+        self._grid_Y = np.array(self._drift_cfg.Y, copy=True)
 
     def _lane_polygon(self, lane, *, margin: float = 0.0, n_samples: int = 96) -> np.ndarray:
         samples = np.linspace(0.0, float(lane.length), max(2, int(n_samples)))
@@ -373,8 +450,12 @@ class DriftOverlayWrapper(gym.Wrapper):
         road = getattr(raw, "road", None)
         if road is None or not getattr(road, "network", None):
             return None
+        if self._drift_cfg is None:
+            return None
 
-        query_points = np.column_stack([cfg.X.ravel(), cfg.Y.ravel()])
+        query_points = np.column_stack(
+            [self._drift_cfg.X.ravel(), self._drift_cfg.Y.ravel()]
+        )
         mask = np.zeros(query_points.shape[0], dtype=bool)
 
         for _from, to_dict in road.network.graph.items():
@@ -387,9 +468,9 @@ class DriftOverlayWrapper(gym.Wrapper):
                     mask |= lane_path.contains_points(query_points, radius=0.10)
 
         if not np.any(mask):
-            return np.ones_like(cfg.X, dtype=np.float32)
+            return np.ones_like(self._drift_cfg.X, dtype=np.float32)
 
-        road_mask = mask.reshape(cfg.X.shape).astype(np.float32)
+        road_mask = mask.reshape(self._drift_cfg.X.shape).astype(np.float32)
         road_mask = gaussian_filter(road_mask, sigma=0.8)
         max_value = float(np.max(road_mask))
         if max_value > 1e-6:
@@ -400,7 +481,15 @@ class DriftOverlayWrapper(gym.Wrapper):
         vx, vy = vehicle.velocity
         x, y = self._transform_xy(float(vehicle.position[0]), float(vehicle.position[1]))
         vclass = "truck" if bool(getattr(vehicle, "is_truck", False)) or float(getattr(vehicle, "LENGTH", 5.0)) >= 8.0 else "car"
-        drift_vehicle = drift_create_vehicle(vid=vid, x=x, y=y, vx=float(vx), vy=float(vy), vclass=vclass)
+        drift_vehicle = drift_create_vehicle(
+            vid=vid,
+            x=x,
+            y=y,
+            vx=float(vx),
+            vy=float(vy),
+            vclass=vclass,
+            config=self._drift_cfg,
+        )
         drift_vehicle["heading"] = float(vehicle.heading)
         action = getattr(vehicle, "action", None)
         accel = 0.0
@@ -526,7 +615,7 @@ class DriftOverlayWrapper(gym.Wrapper):
         return (0.6 * ramp * lateral + 1.0 * gore) * density
 
     def _source_fn(self, vehicles, ego, X, Y):
-        q_veh = compute_Q_vehicle(vehicles, ego, X, Y)
+        q_veh = compute_Q_vehicle(vehicles, ego, X, Y, config=self._drift_cfg)
         q_occ, occ_mask = compute_Q_occlusion(vehicles, ego, X, Y)
         q_merge = self._compute_merge_source(vehicles, ego, X, Y)
         # Calibrate + clip so the steady-state PDE solution stays in the
@@ -538,44 +627,125 @@ class DriftOverlayWrapper(gym.Wrapper):
         return q_total, q_veh, q_occ, occ_mask
 
     def _lane_risk_ahead(self, lane_index, length: float, n_samples: int = 8) -> float:
-        if lane_index is None:
+        points = self._lane_query_points(lane_index, length=length, n_samples=n_samples)
+        if points.size == 0:
             return 0.0
+        risks = self.drift.get_risk_cartesian(points[:, 0], points[:, 1])
+        return float(np.max(risks)) if len(risks) else 0.0
+
+    def _lane_query_points(self, lane_index, length: float, n_samples: int = 8) -> np.ndarray:
+        if lane_index is None:
+            return np.empty((0, 2), dtype=np.float32)
         raw = self._raw_env()
         ego = raw.vehicle
         lane = raw.road.network.get_lane(lane_index)
         s0, _ = lane.local_coordinates(ego.position)
         s1 = min(float(lane.length), float(s0) + float(length))
         if s1 <= s0:
-            return 0.0
+            return np.empty((0, 2), dtype=np.float32)
         samples = np.linspace(s0, s1, max(2, int(n_samples)))
         points = np.array([self._transform_xy(*lane.position(float(s), 0.0)) for s in samples], dtype=np.float32)
-        risks = self.drift.get_risk_cartesian(points[:, 0], points[:, 1])
-        return float(np.max(risks)) if len(risks) else 0.0
+        return points
+
+    def _lane_lookahead_points(
+        self,
+        lane_index,
+        distances: tuple[float, ...] = (5.0, 10.0, 20.0),
+    ) -> np.ndarray:
+        raw = self._raw_env()
+        ego = raw.vehicle
+        lane = raw.road.network.get_lane(lane_index)
+        s0, _ = lane.local_coordinates(ego.position)
+        points = [
+            self._transform_xy(
+                *lane.position(
+                    min(float(lane.length), max(0.0, float(s0) + distance)),
+                    0.0,
+                )
+            )
+            for distance in distances
+        ]
+        return np.asarray(points, dtype=np.float32)
 
     def _current_metrics(self) -> dict[str, float]:
         raw = self._raw_env()
         ego = raw.vehicle
         x, y = self._transform_xy(float(ego.position[0]), float(ego.position[1]))
-        r_ego = float(self.drift.get_risk_cartesian(x, y))
-        grad_x, grad_y = self.drift.get_risk_gradient_cartesian(x, y)
         current_lane = ego.lane_index
         raw_lane = raw.road.network.get_lane(current_lane)
         s0, _ = raw_lane.local_coordinates(ego.position)
         current_y = raw_lane.position(s0, 0.0)[1]
-        r_fwd = self._lane_risk_ahead(current_lane, length=25.0)
-        r_left = 0.0
-        r_right = 0.0
+        side_queries: list[tuple[str, np.ndarray]] = []
         for candidate in raw.road.network.side_lanes(current_lane):
             candidate_lane = raw.road.network.get_lane(candidate)
             candidate_y = candidate_lane.position(min(float(candidate_lane.length), max(0.0, s0)), 0.0)[1]
-            risk = self._lane_risk_ahead(candidate, length=20.0)
             # HighwayEnv convention: higher y = rightward (lane 0 at y=0, lane 1 at y=4, ...).
             if candidate_y > current_y:
-                r_right = max(r_right, risk)
+                role = "right"
             else:
-                r_left = max(r_left, risk)
+                role = "left"
+            side_queries.append(
+                (role, self._lane_query_points(candidate, length=20.0))
+            )
+
+        sparse_query = getattr(self.drift, "query_cartesian_points", None)
+        lookahead_points = self._lane_lookahead_points(current_lane)
+        if callable(sparse_query):
+            groups: list[tuple[str, np.ndarray]] = [
+                ("ego", np.asarray([[x, y]], dtype=np.float32)),
+                ("lookahead", lookahead_points),
+                ("forward", self._lane_query_points(current_lane, length=25.0)),
+                *side_queries,
+            ]
+            nonempty = [(name, pts) for name, pts in groups if pts.size]
+            combined = np.concatenate([pts for _name, pts in nonempty], axis=0)
+            queried = sparse_query(
+                combined[:, 0], combined[:, 1], compute_gradient=True
+            )
+            offset = 0
+            values: dict[str, list[float]] = {"left": [], "right": []}
+            for name, pts in nonempty:
+                count = len(pts)
+                values.setdefault(name, []).extend(
+                    np.asarray(queried["R"][offset:offset + count], dtype=float).tolist()
+                )
+                offset += count
+            r_ego = float(values["ego"][0])
+            lookahead = list(values.get("lookahead") or [0.0, 0.0, 0.0])
+            lookahead.extend([0.0] * (3 - len(lookahead)))
+            r_5m, r_10m, r_20m = (float(value) for value in lookahead[:3])
+            r_fwd = float(max(values.get("forward") or [0.0]))
+            r_left = float(max(values.get("left") or [0.0]))
+            r_right = float(max(values.get("right") or [0.0]))
+            grad_x = float(queried["grad_x"][0])
+            grad_y = float(queried["grad_y"][0])
+        else:
+            r_ego = float(self.drift.get_risk_cartesian(x, y))
+            grad_x, grad_y = self.drift.get_risk_gradient_cartesian(x, y)
+            lookahead = np.asarray(
+                self.drift.get_risk_cartesian(
+                    lookahead_points[:, 0], lookahead_points[:, 1]
+                ),
+                dtype=float,
+            )
+            r_5m, r_10m, r_20m = (float(value) for value in lookahead[:3])
+            r_fwd = self._lane_risk_ahead(current_lane, length=25.0)
+            r_left = 0.0
+            r_right = 0.0
+            for role, points in side_queries:
+                if points.size == 0:
+                    continue
+                risk = self.drift.get_risk_cartesian(points[:, 0], points[:, 1])
+                value = float(np.max(risk)) if len(risk) else 0.0
+                if role == "left":
+                    r_left = max(r_left, value)
+                else:
+                    r_right = max(r_right, value)
         return {
             "r_ego": r_ego,
+            "r_5m": r_5m,
+            "r_10m": r_10m,
+            "r_20m": r_20m,
             "r_fwd": r_fwd,
             "r_left": r_left,
             "r_right": r_right,
@@ -591,11 +761,15 @@ class DriftOverlayWrapper(gym.Wrapper):
         r_gate = float(np.clip(max(metrics["r_ego"], metrics["r_fwd"]), 0.0, self.risk_clip))
         info = {
             "use_drift": True,
+            "field_backend": self.field_backend,
             "base_reward": None if base_reward is None else float(base_reward),
             "reward_gate": r_gate,
             "reward_gate_scale_r0": self.reward_gate_scale_r0,
             "risk_clip": self.risk_clip,
             "r_ego": metrics["r_ego"],
+            "r_5m": metrics["r_5m"],
+            "r_10m": metrics["r_10m"],
+            "r_20m": metrics["r_20m"],
             "r_fwd": metrics["r_fwd"],
             "r_left": metrics["r_left"],
             "r_right": metrics["r_right"],
@@ -603,6 +777,11 @@ class DriftOverlayWrapper(gym.Wrapper):
             "grad_y": metrics["grad_y"],
             "drift_metrics": dict(metrics),
         }
+        timing = getattr(self.drift, "last_timing", None)
+        if timing is not None and hasattr(timing, "to_dict"):
+            timing_dict = timing.to_dict()
+            info["field_backend_timing_ms"] = timing_dict
+            info["field_backend_step_ms"] = float(timing_dict.get("total_ms", 0.0))
         raw = self._raw_env()
         scenario_info_fn = getattr(raw, "get_scenario_info", None)
         if callable(scenario_info_fn):

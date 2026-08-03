@@ -187,8 +187,14 @@ class SocialEvalCallback(BaseCallback):
         ablation: str,
         eval_freq: int,
         eval_episodes: int,
+        eval_max_steps: int,
         use_drift: bool,
         action_mode: str,
+        append_risk_obs: bool,
+        field_backend: str,
+        pinn_checkpoint: str | None,
+        pinn_device: str,
+        pinn_time_mode: str,
         checkpoints_dir: str,
         verbose: int = 0,
     ) -> None:
@@ -201,8 +207,14 @@ class SocialEvalCallback(BaseCallback):
         self.ablation = ablation
         self.eval_freq = max(1, int(eval_freq))
         self.eval_episodes = max(1, int(eval_episodes))
+        self.eval_max_steps = max(1, int(eval_max_steps))
         self.use_drift = bool(use_drift)
         self.action_mode = str(action_mode)
+        self.append_risk_obs = bool(append_risk_obs)
+        self.field_backend = str(field_backend)
+        self.pinn_checkpoint = pinn_checkpoint
+        self.pinn_device = str(pinn_device)
+        self.pinn_time_mode = str(pinn_time_mode)
         self.checkpoints_dir = checkpoints_dir
         self.records: list[dict[str, float]] = []
         self._step_window: dict[str, list[float]] = defaultdict(list)
@@ -251,6 +263,12 @@ class SocialEvalCallback(BaseCallback):
             episodes=self.eval_episodes,
             use_drift=self.use_drift,
             action_mode=self.action_mode,
+            append_risk_obs=self.append_risk_obs,
+            field_backend=self.field_backend,
+            pinn_checkpoint=self.pinn_checkpoint,
+            pinn_device=self.pinn_device,
+            pinn_time_mode=self.pinn_time_mode,
+            max_steps=self.eval_max_steps,
         )
         row: dict[str, float] = {
             "timesteps": float(self.num_timesteps),
@@ -291,7 +309,24 @@ def _write_csv(path: str, rows: list[dict[str, float]]) -> None:
             writer.writerow(row)
 
 
-def _build_train_env(algo: str, env_id: str, *, interface: str, traffic, reward_config, ablation: str, use_drift: bool, action_mode: str, seed: int, n_envs: int):
+def _build_train_env(
+    algo: str,
+    env_id: str,
+    *,
+    interface: str,
+    traffic,
+    reward_config,
+    ablation: str,
+    use_drift: bool,
+    action_mode: str,
+    append_risk_obs: bool,
+    field_backend: str,
+    pinn_checkpoint: str | None,
+    pinn_device: str,
+    pinn_time_mode: str,
+    seed: int,
+    n_envs: int,
+):
     def _env_factory():
         return Monitor(
             make_social_highwayenv_env(
@@ -302,6 +337,11 @@ def _build_train_env(algo: str, env_id: str, *, interface: str, traffic, reward_
                 ablation=ablation,
                 use_drift=use_drift,
                 action_mode=action_mode,
+                append_risk_obs=append_risk_obs,
+                field_backend=field_backend,
+                pinn_checkpoint=pinn_checkpoint,
+                pinn_device=pinn_device,
+                pinn_time_mode=pinn_time_mode,
             )
         )
 
@@ -325,6 +365,20 @@ def main() -> None:
     parser.add_argument("--reward-config", default="rl/config/social_reward_v1.json")
     parser.add_argument("--ablation", default="full")
     parser.add_argument("--use-drift", type=_str2bool, default=True)
+    parser.add_argument(
+        "--append-risk-obs",
+        type=_str2bool,
+        default=False,
+        help="Flatten the stock observation and append eight normalized field queries.",
+    )
+    parser.add_argument(
+        "--field-backend",
+        choices=["numerical", "prospective", "pinn"],
+        default="numerical",
+    )
+    parser.add_argument("--pinn-checkpoint", default="")
+    parser.add_argument("--pinn-device", default="cpu")
+    parser.add_argument("--pinn-time-mode", choices=["error", "clip"], default="error")
     parser.add_argument("--traffic-preset", default="medium")
     parser.add_argument("--vehicles-count", type=int, default=None)
     parser.add_argument("--vehicles-density", type=float, default=None)
@@ -337,6 +391,12 @@ def main() -> None:
     parser.add_argument("--total-steps", type=int, default=20000)
     parser.add_argument("--eval-freq", type=int, default=2000)
     parser.add_argument("--eval-episodes", type=int, default=5)
+    parser.add_argument(
+        "--eval-max-steps",
+        type=int,
+        default=600,
+        help="Finite evaluation horizon for scenarios such as merge-v0 that have no native timeout.",
+    )
     parser.add_argument("--n-envs", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--run-dir", default="")
@@ -378,9 +438,15 @@ def main() -> None:
         "requested_action_mode": args.action_mode,
         "ablation": args.ablation,
         "use_drift": bool(args.use_drift),
+        "append_risk_obs": bool(args.append_risk_obs),
+        "field_backend": args.field_backend if args.use_drift else "disabled",
+        "pinn_checkpoint": str(args.pinn_checkpoint),
+        "pinn_device": str(args.pinn_device),
+        "pinn_time_mode": str(args.pinn_time_mode),
         "total_steps": int(args.total_steps),
         "eval_freq": int(args.eval_freq),
         "eval_episodes": int(args.eval_episodes),
+        "eval_max_steps": int(args.eval_max_steps),
         "n_envs": int(args.n_envs),
         "seed": int(args.seed),
         "device": str(args.device),
@@ -400,6 +466,11 @@ def main() -> None:
         ablation=args.ablation,
         use_drift=bool(args.use_drift),
         action_mode=action_mode,
+        append_risk_obs=bool(args.append_risk_obs),
+        field_backend=args.field_backend,
+        pinn_checkpoint=str(args.pinn_checkpoint).strip() or None,
+        pinn_device=args.pinn_device,
+        pinn_time_mode=args.pinn_time_mode,
         seed=int(args.seed),
         n_envs=int(args.n_envs),
     )
@@ -420,8 +491,14 @@ def main() -> None:
         ablation=args.ablation,
         eval_freq=int(args.eval_freq),
         eval_episodes=int(args.eval_episodes),
+        eval_max_steps=int(args.eval_max_steps),
         use_drift=bool(args.use_drift),
         action_mode=action_mode,
+        append_risk_obs=bool(args.append_risk_obs),
+        field_backend=args.field_backend,
+        pinn_checkpoint=str(args.pinn_checkpoint).strip() or None,
+        pinn_device=args.pinn_device,
+        pinn_time_mode=args.pinn_time_mode,
         checkpoints_dir=str(checkpoints_dir),
         verbose=0,
     )
@@ -451,6 +528,12 @@ def main() -> None:
         episodes=int(args.eval_episodes),
         use_drift=bool(args.use_drift),
         action_mode=action_mode,
+        append_risk_obs=bool(args.append_risk_obs),
+        field_backend=args.field_backend,
+        pinn_checkpoint=str(args.pinn_checkpoint).strip() or None,
+        pinn_device=args.pinn_device,
+        pinn_time_mode=args.pinn_time_mode,
+        max_steps=int(args.eval_max_steps),
     )
     summary = {
         "run_dir": str(run_dir),
