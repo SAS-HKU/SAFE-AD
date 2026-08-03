@@ -1,475 +1,492 @@
-# SAFE-AD: Socially-Aware Field-Enhanced Reinforcement Learning for Autonomous Driving
-Zian Wang, Wenjie Huang, Zejian Deng, Yiming Shu, Jiahui Xu, Yong Wang, Shen Li, Dongpu Cao, Chen Sun ✉
+# XLeRobot 0.3 stereo mapping and navigation: expert-review handoff
 
-![Code Status](https://img.shields.io/badge/code-partial_release-orange)
-![Demos](https://img.shields.io/badge/demonstrations-ready-brightgreen)
-![Preprint](https://img.shields.io/badge/preprint-coming_soon-lightgrey)
-![License](https://img.shields.io/badge/license-MIT-blue)
-![Python](https://img.shields.io/badge/python-3.9%2B-blue)
+Last updated: 2026-08-03
 
-SAFE-AD is a research prototype for **socially-aware and risk-aware reinforcement learning in interactive autonomous driving**.
-The central idea is to use a **physics-informed propagated risk field** as a structured intermediate representation for RL tactical planning. Instead of penalizing only instantaneous scalar risk, SAFE-AD models how risk propagates through traffic and maps this field to ego safety, surrounding-vehicle exposure, and social externality.
+This directory is the current ROS 2 Jazzy mapping and navigation integration for the local
+XLeRobot 0.3. This document assumes familiarity with the XLeRobot mechanical and software
+architecture and focuses on this robot's calibration state, data flow, controller choices,
+validated behavior, and remaining risks.
 
-The preliminary PDE-governed risk-field model is based on [DRIFT](https://github.com/PeterWANGHK/DRIFT.git).
+## Executive status
 
-![Methodology graph](assests/SAFE-AD-graphical-abstract.jpg)
+The robot model and measured arm/head joint states have been visually aligned with the real
+hardware. The two wrist cameras can produce rectified images, disparity, live point clouds,
+stereo visual odometry, and RTAB-Map data. Wheel encoder velocity and stereo pose are fused by
+`robot_localization`; Nav2 starts successfully in dry-run and all managed nodes become active.
 
+The system is **not yet accepted for autonomous physical navigation**. The wrist-stereo
+intrinsics/extrinsics are still nominal URDF-derived values, stereo correspondence rejection is
+frequent, and the current `maps/session_01.db` did not publish a usable static map or relocalize
+during the latest navigation dry-run (`local map=0`, `WM=1`, Nav2 reported `no map received`).
+Obstacle avoidance has been wired but has not yet passed controlled physical validation.
 
-## Core Ideas
+## Hardware and calibration state
 
-- **Propagated risk field**: models spatial-temporal traffic risk instead of only instantaneous ego risk.
-- **PINN surrogate**: learns a differentiable approximation of the PDE-governed risk field.
-- **Risk-aware RL**: appends field-derived risk features to the policy observation.
-- **Social-aware reward shaping**: penalizes imposed risk, backward disturbance, jerk, abrupt steering, and unsafe close interactions.
+### Connected hardware
 
----
-
-## Installation and Environment
-
-SAFE-AD targets Python 3.9+. A conda environment is recommended.
-
-```bash
-# 1. Create env
-conda create -n safead python=3.10 -y && conda activate safead
-
-# 2. PyTorch (CUDA 12.x build, matching the workstation in the paper)
-pip install torch==2.11 --index-url https://download.pytorch.org/whl/cu128
-
-# 3. Core RL + sim stack
-pip install stable-baselines3==2.* gymnasium scienceplots matplotlib scipy python-docx
-pip install metadrive-simulator==0.4.3
-pip install highway-env
-
-# 4. Project code
-git clone https://github.com/<org>/SAFE-AD.git
-cd SAFE-AD
-pip install -r requirements.txt   # if provided
-```
-
-Hardware used in the paper: **NVIDIA GeForce RTX 5080 GPU (16 GB VRAM)** with PyTorch 2.11 + CUDA 12.8.
-
-## Risk Field and PINN Demonstrations
-
-Numerically solved risk field and PINN-generated risk field:
-
-![PINN_examples](assests/DRIFT_PINN_1.gif)
-
-PINN field outputs across highway, merging, roundabout, and intersection scenarios:
-
-![PINN_scenario](assests/pinn_result.jpg)
-
-## Datasets
-
-The project uses naturalistic driving datasets for trajectory processing, behavior extraction, and field validation.
-
-Dataset sources:
-
-- [Ubiquitous Traffic Eyes](http://www.seutraffic.com/#/download)
-- [leveLXData](https://levelxdata.com/) (highD, inD, rounD, exiD, uniD)
-
-### Behavior / feature extraction
-
-Each raw dataset is converted into per-frame behavioral features and tactical labels used downstream by both PINN training and behavior cloning.
-
-```bash
-# highD (full corpus)
-python -m rl.data.historical_extractor \
-  --dataset-format highD --data-dir data/highD --recordings all \
-  --include-social --out-path rl/checkpoints/bc_highd_v4.npz
-
-# exiD (full corpus, interaction-rich)
-python -m rl.data.historical_extractor \
-  --dataset-format exiD  --data-dir data/exiD  --recordings all \
-  --include-social --out-path rl/checkpoints/bc_exid_v4.npz
-
-# SQM-N-4 (Ubiquitous Traffic Eyes example)
-python -m rl.data.historical_extractor \
-  --dataset SQM-N-4 --data-dir data/SQM-N-4 \
-  --out-path rl/checkpoints/bc_sqm_v3.npz
-
-# Smoke / quick audit (one recording, capped tracks)
-python -m rl.data.historical_extractor \
-  --dataset-format highD --data-dir data/highD --recordings 01 \
-  --limit-tracks 50 --include-social \
-  --out-path rl/checkpoints/bc_highd_smoke.npz --no-manifest
-```
-
-Outputs are schema-v4 `.npz` files containing per-frame ego/neighbor states, lane-utility advantages, courtesy / disturbance / decision-quality labels, and field-based externality metrics (see [`rl/data/SOCIAL_FRIENDLINESS.md`](rl/data/SOCIAL_FRIENDLINESS.md)).
-
----
-
-## PINN Risk-Field Training and Validation
-
-SAFE-AD now releases the recording-disjoint **prospective context PINN** used in
-the revision experiments. Its teacher is a causal 3 s transport-diffusion
-operator that uses only the scene available at the current sensing instant.
-The surrogate receives a 17-channel ego-local context tensor containing source,
-transport, diffusion, road, occupancy, distance, and domain information, and
-returns the complete propagated field on a `41 x 141` grid.
-
-![PINN graph](assests/SAFE-AD-PINN.jpg)
-
-### Released checkpoint
-
-The accepted checkpoint is
-[`rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt`](rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt).
-Its SHA-256, split, architecture, intended use, and limitations are recorded in
-the adjacent [model card](rl/checkpoints/pinn/MODEL_CARD.md).
-The fixed 33-D merge policy used only for backend-swap reproducibility is also
-released at
-[`rl/checkpoints/highwayenv/prospective_merge_ppo_20k/best_model.zip`](rl/checkpoints/highwayenv/prospective_merge_ppo_20k/best_model.zip).
-
-### Reproduce the pipeline
-
-The complete commands are in
-[`docs/pinn_multirecord_backend_commands.md`](docs/pinn_multirecord_backend_commands.md).
-The workflow explicitly separates teacher construction, PINN fidelity, and a
-fixed-policy backend swap:
-
-```bash
-# Verify the released model and paired field-core runtime.
-python -m rl.benchmark_prospective_field_runtime \
-  --cache-globs "evaluation/pinn_prospective_v2_cache/highwayenv_merge_v0_seed010*" \
-  --checkpoint rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt \
-  --devices cpu cuda --frames-per-recording 20
-```
-
-Kernel-only latency is not reported as policy inference latency. The supplied
-benchmark separates context construction, device transfer, neural/PDE kernel,
-post-processing, complete field-backend time, and environment-step time. CUDA
-improves the neural component, while the current online implementation remains
-limited by CPU scene conditioning; the supported claim is behavioral
-interchangeability rather than an unconditional speedup.
-
-The qualitative merge comparison uses HighwayEnv's lane-valid IDM ego on the
-standard merge road. It visualizes the field backend only; RL policy outcomes
-are evaluated separately by the paired backend-swap command.
-
-![Lane-valid numerical and PINN merge fields](assests/merge_normal_pinn_teacher.png)
-
----
-
-## Simulation Design
-![Experiment graph](assests/SAFE-AD-experiment-2.jpg)
-
-## Highway-env Experiments
-
-The highway-env layer is the controlled and interpretable benchmark. It evaluates whether risk-field and social-interaction features improve tactical RL behavior in highway, merge, roundabout, and intersection scenarios.
-
-The environment configurations are forked from [HighwayEnv](https://github.com/Farama-Foundation/HighwayEnv.git).
-
-### Behavior cloning warm-start
-
-```bash
-python -m rl.train_bc \
-  --dataset rl/checkpoints/bc_exid_v4.npz \
-  --out rl/checkpoints/decision_policy_bc.pt
-```
-
-### RL training (the three reward arms)
-
-```bash
-# 1) Stock baseline (highway-env stock reward)
-python -m rl.train_highwayenv_social_sb3 \
-  --env-id highway-v0 --algo ppo --steps 1_000_000 \
-  --reward-profile stock \
-  --run-name highway_stock_ppo
-
-# 2) Risk-only (DRIFT/PINN risk observation + risk penalty)
-python -m rl.train_highwayenv_social_sb3 \
-  --env-id highway-v0 --algo ppo --steps 1_000_000 \
-  --reward-profile risk_only --pinn pinn_multi_all.pt \
-  --run-name social_ppo_riskonly
-
-# 3) Social-tuned (full social shaping; A5 ablation = full)
-python -m rl.train_highwayenv_social_sb3 \
-  --env-id highway-v0 --algo ppo --steps 1_000_000 \
-  --reward-profile full --pinn pinn_multi_all.pt \
-  --run-name social_ppo_a5
-
-# DQN variant (discrete)
-python -m rl.train_highwayenv_social_sb3 \
-  --env-id highway-v0 --algo dqn --steps 1_000_000 \
-  --reward-profile full --pinn pinn_multi_all.pt \
-  --run-name social_dqn_a5
-```
-
-A multi-scenario benchmark driver runs the matrix in one shot:
-
-```bash
-python -m rl.run_highwayenv_social_benchmark \
-  --envs highway-v0 merge-v0 roundabout-v0 intersection-v0 \
-  --algos ppo dqn --arms stock risk_only full \
-  --steps 1_000_000 --tag paper_highway
-```
-
-### Evaluation
-
-```bash
-# Headline comparison: trained RL vs IDM/MOBIL across scenarios
-python -m rl.eval_highwayenv_social_sb3 \
-  --checkpoint rl/checkpoints/social_ppo_a5/final.zip \
-  --envs highway-v0 merge-v0 roundabout-v0 intersection-v0 \
-  --episodes 20 --out rl/logs/eval_social_ppo_a5
-
-# Quick visual roll-out (with PINN risk overlay)
-python highway_test.py \
-  --rl-policy-mode decision \
-  --rl-decision-checkpoint rl/checkpoints/decision_policy_ppo.pt \
-  --steps 400 --save-dir figsave_test_rl
-```
-
-Example snapshot comparing a social/risk-aware RL agent with baseline RL and IDM/MOBIL:
-
-![Result](assests/roundabout_snapshot.jpg)
-
----
-
-## MetaDrive Experiments
-
-The MetaDrive layer tests whether the same field-enhanced RL design transfers to higher-fidelity driving with procedural maps, continuous vehicle dynamics, and interactive IDM traffic.
-
-The environment configurations are forked from [MetaDrive](https://github.com/metadriverse/metadrive.git).
-
-### Algorithm support
-
-| Algorithm | Action Space | Usage |
+| Function | Stable device | Current backing device |
 |---|---|---|
-| PPO | Discrete / continuous | Main discrete benchmark |
-| DQN | Discrete | Discrete baseline |
-| SAC | Continuous | Continuous-control baseline |
-| TD3 | Continuous | Continuous-control baseline |
-| DDPG | Continuous | Continuous-control baseline |
-| IDM/MOBIL | Rule-based | Reference controller |
+| Physical left arm and head | `/dev/arm_left` | `/dev/ttyACM0` |
+| Physical right arm and three-wheel base | `/dev/arm_right` | `/dev/ttyACM1` |
+| Head/center RGB camera | `/dev/camera_center` | `/dev/video0` |
+| Left wrist RGB camera | `/dev/camera_left` | `/dev/video2` |
+| Right wrist RGB camera | `/dev/camera_right` | `/dev/video4` |
 
-### Single-run training template (one config)
+The mapping pipeline currently uses only the two wrist cameras. The center camera is not yet an
+input to localization, mapping, or obstacle avoidance.
 
-```bash
-# Stock baseline
-python rl/train_metadrive_sb3.py \
-  --protocol matched_stock_intersection_respawn \
-  --algo ppo --steps 1_000_000 --n-envs 4 --device cuda \
-  --run-name matched_stock_intersection_respawn_ppo_1m
+### Motor calibration and zero convention
 
-# Risk-only (DRIFT risk obs + risk penalty)
-python rl/train_metadrive_sb3.py \
-  --protocol matched_social_risk_intersection_respawn \
-  --algo ppo --steps 1_000_000 --n-envs 4 --device cuda \
-  --reward-profile risk_only \
-  --run-name matched_social_risk_intersection_respawn_ppo_1m
+The active Feetech calibration directory is:
 
-# Social-tuned (decoupled weights used in the paper)
-python rl/train_metadrive_sb3.py \
-  --protocol matched_social_risk_intersection_respawn_continuous \
-  --algo sac --steps 1_000_000 --n-envs 4 --device cuda \
-  --reward-profile social_full \
-  --lambda-risk 0.02 --lambda-jerk 0.0015 --lambda-steer-delta 0.001 \
-  --lambda-steer-abs 0.0 --lambda-throttle-delta 0.001 \
-  --w-hard-brake 0.03 --w-courtesy 0.05 --w-rear-ttc 0.02 --w-back-flux 0.02 \
-  --run-name socialbench_intersection_social_sac_decoupled_1m
+```text
+~/.cache/robocrew/calibrations/robots/so_follower/
 ```
 
-Continuous-control algorithms (SAC / TD3 / DDPG) require the `*_continuous` protocols (e.g. `matched_stock_intersection_respawn_continuous`).
+| Chain | Motor | ID | Homing offset (ticks) | Calibrated raw range |
+|---|---|---:|---:|---:|
+| Left | shoulder pan | 1 | -277 | 1097–2934 |
+| Left | shoulder lift | 2 | +798 | 941–3233 |
+| Left | elbow flex | 3 | -956 | 878–3080 |
+| Left | wrist flex | 4 | -442 | 836–2999 |
+| Left | wrist roll | 5 | +1638 | 0–4095 |
+| Left | gripper | 6 | -676 | 2024–3518 |
+| Right | shoulder pan | 1 | +839 | 1177–3059 |
+| Right | shoulder lift | 2 | -1706 | 879–3148 |
+| Right | elbow flex | 3 | +165 | 913–3112 |
+| Right | wrist flex | 4 | +420 | 884–3147 |
+| Right | wrist roll | 5 | -1762 | 0–4095 |
+| Right | gripper | 6 | -840 | 2043–3532 |
+| Head | pan | 7 | -1864 | 0–4095 |
+| Head | tilt | 8 | -1293 | 0–4095 |
 
-### One-step matrix benchmark (recommended)
+The right wrist-roll servo was replaced and re-zeroed. The arm/head motor zero is the current
+physical reference used by `move_all_joints_to_zero.py`. Grippers and wheels are excluded from
+that coordinated zero command. Under gravity, the two elbows can settle a few degrees away from
+their zero targets; the most recent read during validation was approximately +2.8° physical-left
+elbow and +1.3° physical-right elbow, with the remaining arm/head joints close to zero.
 
-```bash
-# Full {stock, social_full} x {PPO, DQN, SAC, TD3, DDPG} on one scenario, CUDA
-python -m rl.run_social_benchmark --scenarios intersection --device cuda
+The navigation hardware interface reads calibrated angles and publishes `/joint_states`; it does
+not assume that commanded zero was reached exactly.
 
-# Several scenarios; also include the discrete PPO that pairs with DQN
-python -m rl.run_social_benchmark \
-  --scenarios intersection merge roundabout --ppo-track both --device cuda
+### URDF and joint mapping
 
-# Preview without running
-python -m rl.run_social_benchmark --scenarios intersection --dry-run
+The only active robot description is:
+
+```text
+/home/hkusas/lerobot/calibration_data/urdf/xlerobot.urdf
 ```
 
-Run names follow `socialbench_<scenario>_<stock|social>_<algo>_1m`; the driver is **resumable** (existing `final.zip` is skipped).
+The model was manually matched to the real robot after motor re-zeroing. The real-hardware joint
+mapping is baked into URDF joint origins/axes, so runtime publication uses the `direct` mapping.
+The simulator-only `root -> root_arm_1_link_1 -> root_arm_1_link_2 -> chassis` chain was removed;
+`chassis` is the ROS hardware root. This avoids a competing parent for `chassis` when odometry
+publishes `odom -> chassis`.
 
-### Multi-seed re-training (paper Fig. 5(a) shaded band)
+`robot_state_publisher` emits a harmless KDL warning because the root `chassis` link has inertia.
+Do not add a second parent above `chassis` without changing the odometry base frame and reviewing
+the complete TF tree.
 
-```bash
-W="--lambda-risk 0.02 --lambda-jerk 0.0015 --lambda-steer-delta 0.001 \
-   --lambda-steer-abs 0.0 --lambda-throttle-delta 0.001 \
-   --w-hard-brake 0.03 --w-courtesy 0.05 --w-rear-ttc 0.02 --w-back-flux 0.02"
-for s in 1 2; do
-  python rl/train_metadrive_sb3.py --protocol matched_stock_intersection_respawn_continuous       --algo sac --steps 1_000_000 --n-envs 4 --device cuda --seed $s                                --run-name msd_stock_sac_int_s$s
-  python rl/train_metadrive_sb3.py --protocol matched_social_risk_intersection_respawn_continuous --algo sac --steps 1_000_000 --n-envs 4 --device cuda --seed $s --reward-profile risk_only       --run-name msd_risk_sac_int_s$s
-  python rl/train_metadrive_sb3.py --protocol matched_social_risk_intersection_respawn_continuous --algo sac --steps 1_000_000 --n-envs 4 --device cuda --seed $s --reward-profile social_full $W --run-name msd_social_sac_int_s$s
-done
+### Wrist-stereo calibration
+
+Current calibration files:
+
+```text
+navigation/config/left.yaml
+navigation/config/right.yaml
+navigation/config/nominal_stereo.json
 ```
 
-### Evaluation
+Current assumptions:
 
-MetaDrive evaluation supports stock RL, risk-aware RL, social-risk RL, IDM and random baselines.
-
-Planner format: `label@protocol:path/to/final.zip` (RL) or `idm@protocol` / `random@protocol`.
-
-```bash
-# Headline 3-arm evaluation at intersection (15 planners, 20 paired seeds)
-python rl/eval_metadrive.py --run-name eval_intersection_3arm_full \
-  --seeds 10000:10020 --densities 0.3 \
-  --planners "stock_sac@matched_stock_intersection_respawn_continuous:rl/checkpoints/metadrive/matched_stock_intersection_respawn_sac_1m/final.zip,\
-risk_sac@matched_social_risk_intersection_respawn_continuous:rl/checkpoints/metadrive/matched_social_risk_intersection_respawn_sac_1m/final.zip,\
-social_sac@matched_social_risk_intersection_respawn_continuous:rl/checkpoints/metadrive/socialbench_intersection_social_sac_decoupled_1m/final.zip,\
-idm@matched_stock_intersection_respawn_continuous"
-
-# Traffic-density splits (Easy/Moderate/Hard)
-python rl/eval_metadrive.py --run-name eval_intersection_sac_density \
-  --seeds 10000:10020 --densities 0.1,0.3,0.5 \
-  --planners "stock_sac@matched_stock_intersection_respawn_continuous:...sac_1m/final.zip,\
-risk_sac@matched_social_risk_intersection_respawn_continuous:...sac_1m/final.zip,\
-social_sac@matched_social_risk_intersection_respawn_continuous:...decoupled_1m/final.zip"
-
-# Zero-shot transfer (intersection-trained social SAC on merge & roundabout)
-python rl/eval_metadrive.py --run-name eval_zeroshot_social_sac \
-  --seeds 10000:10020 --densities 0.3 \
-  --planners "zeroshot_merge_sac@matched_social_risk_merge_respawn_continuous:.../socialbench_intersection_social_sac_decoupled_1m/final.zip,\
-zeroshot_round_sac@matched_social_risk_roundabout_respawn_continuous:.../socialbench_intersection_social_sac_decoupled_1m/final.zip"
-
-# CBF safety filter ON (continuous planners)
-python rl/eval_metadrive.py --run-name eval_intersection_3arm_cbf --cbf-filter \
-  --seeds 10000:10020 --densities 0.3 --planners "..."
-```
-
-The evaluator reports mean ± 95 % CI across paired seeds for every metric (Section 5 *Pillars*) plus per-step CPU `action_selection_ms` and the optional `cbf_intervention_rate`.
-
-Main reported metrics, grouped into four pillars:
-
-| Pillar | Metrics |
+| Quantity | Value/state |
 |---|---|
-| Task performance | success rate, route completion, episode return |
-| Safety and risk | collision rate, out-of-road rate, TTC violation, near-miss count, cumulative risk exposure, peak risk |
-| Efficiency and flow | mean speed, progress, EI, SEI, SEMI |
-| Comfort and sociality | jerk, steering-change rate, throttle-change rate, backward disturbance, imposed risk, social score |
+| Image size | 640 × 480 |
+| Raw assumed focal length | 320 px |
+| Rectified focal length | approximately 342.08 px |
+| Nominal baseline | 0.2669129 m |
+| Left optical frame | `Left_Arm_Camera_optical_frame` |
+| Right optical frame | `Right_Arm_Camera_optical_frame` |
+| Lens distortion | currently assumed zero |
+| Extrinsics | derived from URDF at the locked arm pose |
 
-## Visualization
+These are **not measured camera intrinsics or stereo extrinsics**. They are sufficient to test
+the software chain but not a defensible final calibration for metric mapping, obstacle clearance,
+COLMAP, or 3DGS. The grippers occlude part of both wrist-camera images and the camera baseline and
+orientation remain valid only while both arms stay torque-locked in the calibrated pose.
 
-3D simulator view:
+## Frames and estimation ownership
+
+The intended TF tree is:
+
+```text
+map -> odom -> chassis -> arm/head links -> camera optical frames
+```
+
+| Transform | Owner |
+|---|---|
+| `map -> odom` | RTAB-Map |
+| `odom -> chassis` | `robot_localization` EKF only |
+| `chassis -> robot links/cameras` | `robot_state_publisher` |
+
+Stereo odometry is configured with `publish_tf=false`; it publishes `/stereo/odom` but does not
+compete with the EKF for `odom -> chassis`. RTAB-Map and stereo odometry are constrained to planar
+3DoF (`x`, `y`, yaw), eliminating the observed visual z/roll/pitch drift that previously tilted
+the entire robot and map.
+
+## Sensing and state-estimation loop
+
+```mermaid
+flowchart LR
+    WL["Left wrist camera"] --> PUB["Synchronized camera publisher"]
+    WR["Right wrist camera"] --> PUB
+    PUB --> RECT["Rectification + Stereo BM"]
+    RECT --> PTS["/stereo/points2"]
+    RECT --> VO["Stereo visual odometry"]
+    VO --> VODOM["/stereo/odom"]
+    ENC["Three wheel velocity encoders"] --> WODOM["/wheel/odom"]
+    WODOM --> EKF["2D robot_localization EKF"]
+    VODOM --> EKF
+    EKF --> FODOM["/odometry/filtered + odom -> chassis"]
+    RECT --> RTAB["RTAB-Map"]
+    VODOM --> RTAB
+    RTAB --> MAP["/stereo/map"]
+    RTAB --> CLOUD["/stereo/cloud_map"]
+```
+
+The camera publisher grabs both USB cameras before retrieval and assigns the same ROS timestamp to
+each pair. The requested application rate is 8 Hz; the V4L devices may report a 10 Hz mode. Actual
+processed rates vary with scene and CPU load.
+
+`stereo_image_proc` currently uses the lighter Block Matching algorithm with a 64-pixel disparity
+range. Approximate synchronization is enabled. Strict synchronization previously caused
+`/stereo/points2` to stop completely when disparity processing lagged behind CameraInfo; after the
+change, live point-cloud output was observed at roughly 1–4.5 Hz.
+
+The hardware interface reads `Present_Velocity` for wheel IDs 7/8/9 at 10 Hz, applies the inverse
+of the current low-speed three-wheel mixer, integrates an approximate wheel pose, and publishes
+`/wheel/odom`. The EKF deliberately fuses wheel **velocity**, not wheel pose, because the omni-wheel
+base slips. Stereo supplies planar pose corrections. Wheel kinematic scale and EKF covariances are
+engineering estimates and remain to be measured.
+
+Important topics:
+
+| Topic | Meaning | Expected behavior |
+|---|---|---|
+| `/joint_states` | Measured calibrated arm/head state | approximately 10 Hz |
+| `/stereo/left/image_raw`, `/stereo/right/image_raw` | synchronized source images | target 8 Hz |
+| `/stereo/disparity` | stereo disparity | scene/load dependent |
+| `/stereo/points2` | live, single-frame 3D cloud | observed approximately 1–4.5 Hz |
+| `/stereo/odom` | visual odometry | may stop or report quality 0 on visual failure |
+| `/wheel/odom` | encoder-derived planar velocity/pose | validated approximately 10 Hz |
+| `/odometry/filtered` | fused planar state used by Nav2 | validated approximately 10 Hz |
+| `/stereo/cloud_map` | RTAB-Map accumulated 3D cloud | updates on accepted keyframes |
+| `/stereo/map` | 2D occupancy grid used by Nav2 | must exist before planning |
+
+## Mapping mode
+
+RTAB-Map stores a graph, compressed sensor data, constraints, and map products in a `.db`; the
+database is not merely a 2D image. The same database can produce a 3D accumulated cloud and a 2D
+occupancy map. Robot motion is planar, while sensed geometry remains 3D.
+
+RTAB-Map keyframe thresholds are 0.05 m translation or 0.05 rad rotation. Stop mapping with
+Ctrl+C and wait for `Saving database/long-term memory...done!`.
 
 ```bash
-python rl/watch_metadrive_agent.py --planner rl --algo sac \
-  --protocol matched_social_risk_intersection_respawn_continuous \
-  --checkpoint rl/checkpoints/metadrive/socialbench_intersection_social_sac_decoupled_1m/final.zip \
-  --view 3d --episodes 3 --seed 10000 --density 0.3
+source /opt/ros/jazzy/setup.bash
+cd /home/hkusas/lerobot
+ros2 launch navigation/xlerobot_stereo_mapping.launch.py \
+  database_path:=/home/hkusas/lerobot/navigation/maps/session_01.db
 ```
 
-Top-down view with risk-field overlay:
+For motorized mapping, the hardware interface must be the sole serial-bus owner:
 
 ```bash
-python rl/watch_metadrive_agent.py --planner rl --algo ppo \
-  --protocol matched_stock_merge_respawn \
-  --checkpoint rl/checkpoints/metadrive/matched_stock_merge_respawn_ppo_1m/final.zip \
-  --view top_down --risk-overlay --episodes 3 --seed 10000 --density 0.3
+# Terminal 1: wheel control, joint states, and wheel odometry
+source /opt/ros/jazzy/setup.bash
+cd /home/hkusas/lerobot
+/home/hkusas/miniforge3/envs/lerobot/bin/python \
+  -m navigation.xlerobot_hardware_interface --enable-wheels
+
+# Terminal 2: mapping without the duplicate read-only joint publisher
+source /opt/ros/jazzy/setup.bash
+cd /home/hkusas/lerobot
+ros2 launch navigation/xlerobot_stereo_mapping.launch.py \
+  launch_hardware_joint_states:=false \
+  database_path:=/home/hkusas/lerobot/navigation/maps/session_01.db
+
+# Terminal 3: deliberately slow teleoperation
+source /opt/ros/jazzy/setup.bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard \
+  --ros-args -p speed:=0.025 -p turn:=0.10
 ```
 
-Side-by-side risk-field overlay PNG (best for paper figures):
+## Navigation policy and planning modules
+
+This is a classical Nav2 navigation policy, not a learned policy.
+
+```mermaid
+flowchart LR
+    GOAL["Nav2 goal"] --> BT["NavigateToPose behavior tree"]
+    BT --> GLOBAL["Navfn A* global planner"]
+    GLOBAL --> SMOOTH["SimpleSmoother"]
+    SMOOTH --> DWB["DWB omni local planner"]
+    COST["Static + live stereo costmaps"] --> DWB
+    DWB --> VS["Closed-loop velocity smoother"]
+    VS --> CMD["/cmd_vel"]
+    CMD --> SAFE["Clamp + ramp + watchdog + e-stop"]
+    SAFE --> WHEELS["Three-wheel base"]
+```
+
+### Global planning
+
+- `nav2_navfn_planner::NavfnPlanner` with `use_astar=true`.
+- Planning source: global costmap containing `/stereo/map`, live stereo obstacles, and inflation.
+- Unknown cells are not traversable (`allow_unknown=false`).
+- Planning tolerance is 0.25 m.
+- `nav2_smoother::SimpleSmoother` refines the resulting grid path.
+
+### Local trajectory policy
+
+- `dwb_core::DWBLocalPlanner`, configured for holonomic `vx`, `vy`, and yaw.
+- Candidate samples: 7 × 5 × 9; simulation horizon: 2.5 s.
+- Critics: `RotateToGoal`, `Oscillation`, `BaseObstacle`, `GoalAlign`, `PathAlign`,
+  `PathDist`, and `GoalDist`.
+- Controller frequency: 8 Hz to leave compute headroom for stereo.
+- Progress requirement: 0.05 m within 30 s.
+- Goal tolerance: 0.12 m and 0.15 rad.
+
+### Motion limits
+
+| Quantity | Limit |
+|---|---:|
+| Forward/reverse | ±0.04 m/s |
+| Lateral | ±0.025 m/s |
+| Yaw | ±0.12 rad/s |
+| Acceleration x/y/yaw | 0.06 / 0.04 / 0.18 |
+| Deceleration x/y/yaw | -0.08 / -0.06 / -0.25 |
+
+The Nav2 controller, closed-loop velocity smoother, and hardware clamp use the same limits.
+The hardware control loop runs at 30 Hz, ramps wheel raw commands by at most 25 units per tick,
+and forces zero after 0.30 s without a fresh `/cmd_vel`.
+
+### Recovery behaviors
+
+The current behavior server exposes spin, backup, drive-on-heading, and wait. Recovery rotation is
+limited to 0.12 rad/s. These behaviors have not yet been physically validated against the wrist
+camera blind zones; automatic recovery should be treated as untrusted until obstacle tests pass.
+
+## Obstacle avoidance configuration
+
+Robot footprint:
+
+```text
+[[-0.24, -0.27], [-0.24, 0.27], [0.24, 0.27], [0.24, -0.27]] m
+```
+
+An additional 0.02 m footprint padding is applied. The inflation radius is 0.38 m.
+
+The local rolling costmap is 3 × 3 m at 0.05 m resolution. Its `VoxelLayer` marks and clears from
+`/stereo/points2`. The global costmap combines the RTAB-Map static occupancy grid with a live
+PointCloud2 obstacle layer. Current stereo obstacle bounds are:
+
+| Parameter | Value |
+|---|---:|
+| Minimum obstacle height | 0.10 m |
+| Maximum obstacle height | 1.20 m |
+| Obstacle range | 0.20–2.50 m |
+| Raytrace clearing range | 0.20–3.00 m |
+| Voxel vertical extent | 0–1.28 m |
+
+These values are plausible defaults, not validated safety distances. They may miss low obstacles
+below 0.10 m, objects inside the 0.20 m near field, negative obstacles/drop-offs, glass, and
+textureless surfaces. The wrist cameras are partly occluded by the grippers and move if arm torque
+or joint position changes.
+
+## Safety mechanisms
+
+- Wheel hardware is disabled by default (`enable_wheels=false`).
+- Actual wheel register writes require explicit `--enable-wheels` or `enable_wheels:=true`.
+- Non-finite commands latch an emergency stop.
+- Velocity is clamped, ramp-limited, and reset by a 0.30 s watchdog.
+- On process exit, wheel goal velocity is zeroed and wheel torque is disabled.
+- `/xlerobot/emergency_stop` zeros and latches the wheel target.
+- `/xlerobot/clear_emergency_stop` clears the latch but waits for a new command.
+- Only one process may own `/dev/arm_left` and `/dev/arm_right`.
 
 ```bash
-python rl/visualize_metadrive_comparison.py \
-  --planners "stock_sac@matched_stock_intersection_respawn_continuous:.../sac_1m/final.zip,\
-risk_sac@matched_social_risk_intersection_respawn_continuous:.../sac_1m/final.zip,\
-social_sac@matched_social_risk_intersection_respawn_continuous:.../decoupled_1m/final.zip" \
-  --seed 10000 --density 0.3 --max-steps 200 --step-stride 20 \
-  --out rl/logs/metadrive/viz/intersection_3arm_sac_overlay.png
+ros2 service call /xlerobot/emergency_stop std_srvs/srv/Trigger '{}'
+ros2 service call /xlerobot/clear_emergency_stop std_srvs/srv/Trigger '{}'
 ```
 
-Example baseline / proposed rollouts:
+## Validation completed
 
-![TD3_examples](assests/stock_td3_intersection.gif)
-![DDPG_examples](assests/stock_ddpg_intersection.gif)
-![PPO_examples](assests/stock_roundabout_ppo.gif)
-![PPO_examples](assests/social_risk_ppo_intersection.gif)
-![DDPG_examples](assests/ddpg_roundabout.gif)
-![SAC_parallel_examples](assests/intersection_sac_parallel.gif)
+- Real arm/head joint motion and RViz model were visually matched after calibration updates.
+- Simulator-only root links causing a disconnected TF tree were removed.
+- Hardware joint publication and robot-state TF were verified.
+- Planar stereo odometry constraint removed the observed roll/pitch map tilt.
+- Encoder-derived `/wheel/odom` was measured at approximately 10 Hz in no-write dry-run.
+- `/odometry/filtered` and EKF `odom -> chassis` were measured at approximately 10 Hz.
+- Duplicate stereo odometry TF publication is disabled.
+- Approximate stereo synchronization restored `/stereo/points2` after strict-sync starvation.
+- Nav2 controller, planner, smoother, behavior server, BT navigator, and velocity smoother all
+  reached `active` in dry-run.
+- Loaded Nav2 limits were checked as 0.04 / 0.025 / 0.12, and idle `/cmd_vel_guarded` was zero.
 
----
+## Pending problems and required next steps
 
-## Reproducing the Paper Figures
+### P0: measured stereo calibration
 
-The figure scripts read the eval / training logs produced above and emit PNG + PDF with the scienceplots IEEE style.
+Current odometry logs frequently report a large fraction of rejected stereo correspondences.
+Measure each camera's intrinsics and the left-to-right extrinsic transform with a rigid calibration
+target while both arms are torque-locked. Validate rectification with vertical disparity and
+reprojection-error statistics. Re-generate `left.yaml`, `right.yaml`, and the URDF/camera TF
+relationship from the measured result.
+
+Acceptance criteria should include repeatability after power cycling and arm re-zeroing, not only
+a visually plausible disparity image.
+
+### P0: rebuild and validate a navigable map
+
+The current `session_01.db` is approximately 4.3 MB and failed the latest localization dry-run:
+RTAB-Map reported `local map=0`, `WM=1`; `/stereo/map` was unavailable to the global costmap.
+Rebuild after stereo calibration, verify multiple accepted keyframes and loop closure, then test
+cold-start relocalization from several known poses.
+
+Acceptance criteria:
+
+- `/stereo/map` is published after a cold navigation launch.
+- RTAB-Map localization succeeds at the start pose and at multiple displaced poses.
+- `map -> odom -> chassis` remains connected during slow translation and rotation.
+- The 2D map scale and measured wall-to-wall distances agree within an explicit tolerance.
+
+### P0: obstacle-avoidance validation
+
+This is the nearest functional milestone after a valid map. Use soft, high-contrast obstacles and
+a physical/tethered e-stop. Do not begin with people, stairs, glass, or valuable equipment.
+
+Recommended sequence:
+
+1. **Stationary perception test:** place obstacles at measured ranges and heights; verify points in
+   `/stereo/points2`, marking in the local voxel costmap, and clearing after removal.
+2. **Blind-zone characterization:** measure the gripper occlusion, minimum reliable depth, lateral
+   field of view, and whether the footprint self-marks.
+3. **Dry-run planning:** with wheels disabled, place Nav2 goals whose straight path is blocked;
+   verify the global path and DWB local trajectories avoid inflated obstacles.
+4. **Lifted-wheel direction test:** verify forward, reverse, lateral, and yaw signs and compare
+   `/wheel/odom` signs to physical wheel motion.
+5. **Tethered physical stop test:** approach one soft obstacle at 0.02 m/s, measure detection and
+   stopping distance, then repeat at the configured 0.04 m/s maximum.
+6. **Dynamic replan test:** introduce/remove a soft obstacle after motion begins and verify stop,
+   clearing, and replanning without oscillation.
+
+Define quantitative pass/fail thresholds for minimum clearance, maximum stop distance, perception
+dropout duration, and false obstacle rate before enabling recovery behaviors.
+
+### P1: wheel odometry calibration and EKF tuning
+
+The current inverse mixer assumes that raw wheel velocity scales linearly to the configured body
+limits. Measure wheel radius/effective scale, base radius, and each wheel's sign. Drive repeatable
+straight, lateral, and yaw trajectories against external measurements. Tune wheel and stereo
+covariances from residuals rather than hand-selected values. Test slip explicitly.
+
+### P1: physical footprint and camera self-filtering
+
+Measure the actual chassis envelope, including protrusions and cables, and update the footprint.
+Determine whether the grippers/arms enter `/stereo/points2`; add a robot self-filter or depth ROI
+mask if footprint clearing is insufficient.
+
+### P1: sensing robustness and compute budget
+
+Profile camera capture, rectification, disparity, odometry, RTAB-Map, EKF, costmaps, and DWB under
+motion. The current point-cloud rate is low and variable. Establish minimum acceptable rates and
+latency, monitor stale data, and decide whether to reduce resolution, decimate depth, or move to a
+hardware-accelerated stereo implementation.
+
+### P1: missing obstacle classes
+
+The present positive-obstacle PointCloud2 pipeline does not reliably detect drop-offs, transparent
+objects, or very low obstacles. Decide whether to add the calibrated head camera, a depth camera,
+2D lidar, bump sensors, cliff sensors, or a dedicated near-field sensor. The head camera cannot be
+used metrically until its pan/tilt zero and mount extrinsics are measured.
+
+## Navigation launch and review commands
+
+Dry-run only:
 
 ```bash
-# Fig. A (MetaDrive: breadth + stability) — 3-panel
-python docs/build_metadrive_training_figure.py        # -> docs/figA_metadrive_training.png/pdf
-
-# Fig. B (Highway-env: depth of social objective) — 3-panel
-python docs/build_highway_training_figure.py          # -> docs/figB_highway_training.png/pdf
-
-# Reward/return compact (1x3, SAC, three scenarios, arms overlaid; smoothed + raw)
-python docs/build_metadrive_sac_return_compact.py
-
-# Multi-seed shaded learning curve + cross-seed table + Welch t-test
-python rl/plot_rl_shaded_curves.py \
-  --group "Stock SAC=rl/logs/metadrive/matched_stock_intersection_respawn_sac_1m/progress.csv,rl/logs/metadrive/msd_stock_sac_int_s1/progress.csv,rl/logs/metadrive/msd_stock_sac_int_s2/progress.csv" \
-  --group "Risk SAC=..."  --group "Social SAC=..." \
-  --metrics success route_completion --band ci \
-  --out rl/logs/figures/intersection_sac_multiseed
-
-# 4-pillar radar (Safety / Efficiency / Comfort / Courtesy)
-python rl/plot_rl_radar.py --summary rl/logs/metadrive/eval_intersection_3arm_full/eval_summary.json \
-  --planners stock_sac,risk_sac,social_sac,idm --out rl/logs/figures/intersection_sac_radar
-
-# Density violins (Easy / Moderate / Hard)
-python rl/plot_rl_density_violin.py \
-  --episodes rl/logs/metadrive/eval_intersection_sac_density/eval_episodes.csv \
-  --metric route_completion --out rl/logs/figures/intersection_density_violin
-
-# Zero-shot transfer bars
-python rl/plot_rl_zeroshot.py \
-  --zeroshot rl/logs/metadrive/eval_zeroshot_social_sac/eval_summary.json \
-  --native-template "rl/logs/metadrive/eval_{S}_3arm_full/eval_summary.json" \
-  --native-label social_sac --out rl/logs/figures/zeroshot_social_sac
-
-# Per-term reward-decomposition (credit assignment) — per algorithm
-python rl/plot_reward_term_decomposition.py \
-  --train-runs "Intersection=rl/logs/metadrive/socialbench_intersection_social_sac_decoupled_1m/progress.csv" \
-               "Merge=rl/logs/metadrive/socialbench_merge_social_sac_decoupled_1m/progress.csv" \
-               "Roundabout=rl/logs/metadrive/socialbench_roundabout_social_sac_decoupled_1m/progress.csv" \
-  --out rl/logs/figures/social_sac_decomp
-
-# Per-scenario 3-arm Word table (paper-grade)
-python docs/build_3arm_scenario_docx.py   # -> docs/metadrive_{intersection,merge,roundabout}_3arm_summary.docx
-
-# Combined cross-scenario Word doc (headline SAC table + 6 tables + 2-col analysis + Figs)
-python docs/build_3arm_combined_docx.py   # -> docs/metadrive_3arm_combined_summary_withfigs.docx
+source /opt/ros/jazzy/setup.bash
+cd /home/hkusas/lerobot
+ros2 launch navigation/xlerobot_navigation.launch.py \
+  database_path:=/home/hkusas/lerobot/navigation/maps/session_01.db \
+  enable_wheels:=false
 ```
 
-## Replication Package Layout
+Physical navigation is intentionally explicit and should only follow successful dry-run,
+localization, direction, and obstacle tests:
 
+```bash
+ros2 launch navigation/xlerobot_navigation.launch.py \
+  database_path:=/home/hkusas/lerobot/navigation/maps/session_01.db \
+  enable_wheels:=true
 ```
-SAFE-AD/
-├── README.md                       # this file
-├── requirements.txt                # pinned python deps
-├── LICENSE
-├── config.py                       # DRIFT grid/PDE config
-├── pde_solver.py                   # numerical PDE risk field
-├── pinn_risk_field.py              # PINN surrogate (train / eval / finetune)
-├── pinn_highway_train.py           # PINN training script
-├── pinn_compare_fields.py          # PINN vs PDE field-level comparison
-├── pinn_scene_compare.py           # PINN per-scene quantitative comparison
-├── pinn_*.pt                       # released PINN checkpoints (highway, inD, rounD, exiD, multi)
-├── Integration/                    # DRIFT interface used by RL wrapper
-├── rl/                             # RL training, evaluation, plotting (data + envs + plotters)
-│   ├── env/                        # MetaDrive / HighwayEnv wrappers (incl. DRIFT wrapper)
-│   ├── config/                     # protocols + RL config
-│   ├── data/                       # historical_extractor, social_features, social_reward
-│   ├── reward/                     # composed social reward
-│   ├── safety/                     # CBF safety filter + MetaDrive adapter
-│   ├── train_metadrive_sb3.py      # MetaDrive trainer
-│   ├── run_social_benchmark.py     # one-step matrix driver (MetaDrive)
-│   ├── train_highwayenv_social_sb3.py
-│   ├── run_highwayenv_social_benchmark.py
-│   ├── eval_metadrive.py           # MetaDrive evaluator
-│   ├── eval_highwayenv_social_sb3.py
-│   ├── plot_*.py                   # scienceplots figure generators
-│   └── watch_metadrive_agent.py    # 3D / top-down viewer
-├── metadrive/                      # MetaDrive fork (env configs)
-├── HighwayEnv-master/              # HighwayEnv fork (env configs)
-├── docs/                           # paper-figure builders + Word generators
-│   ├── build_metadrive_training_figure.py
-│   ├── build_highway_training_figure.py
-│   └── build_metadrive_sac_return_compact.py
-└── assests/                        # demo figures and gifs
+
+Useful diagnostics:
+
+```bash
+ros2 topic hz /stereo/points2
+ros2 topic hz /stereo/odom
+ros2 topic hz /wheel/odom
+ros2 topic hz /odometry/filtered
+ros2 run tf2_ros tf2_echo map chassis
+ros2 lifecycle get /controller_server
+ros2 lifecycle get /planner_server
+ros2 topic echo /cmd_vel_guarded --once
 ```
+
+Record source data separately; RTAB-Map database saving does not create a ROS bag:
+
+```bash
+ros2 bag record \
+  -o /home/hkusas/lerobot/navigation/recordings/session_01 \
+  /stereo/left/image_raw \
+  /stereo/right/image_raw \
+  /stereo/left/camera_info \
+  /stereo/right/camera_info \
+  /joint_states \
+  /wheel/odom \
+  /stereo/odom \
+  /odometry/filtered \
+  /tf \
+  /tf_static
+```
+
+## Files for review
+
+| File | Purpose |
+|---|---|
+| `xlerobot_stereo_mapping.launch.py` | camera, stereo, RTAB-Map, EKF, mapping RViz |
+| `xlerobot_navigation.launch.py` | localization, hardware interface, Nav2, navigation RViz |
+| `publish_stereo_cameras.py` | paired USB capture and synchronized ROS publication |
+| `xlerobot_hardware_interface.py` | joint state, wheel encoder odometry, safe `/cmd_vel` bridge |
+| `config/left.yaml`, `config/right.yaml` | current nominal rectification calibration |
+| `config/nominal_stereo.json` | nominal baseline and URDF-derived stereo transform |
+| `config/rtabmap.ini` | planar RTAB-Map and occupancy configuration |
+| `config/ekf.yaml` | wheel/stereo 2D fusion |
+| `config/nav2_params.yaml` | planner, controller, costmaps, behavior, velocity limits |
+| `../calibration_data/urdf/xlerobot.urdf` | active calibrated robot description |
+
+## Questions for expert review
+
+1. Is the rigid wrist-camera arrangement mechanically repeatable enough for calibrated stereo, or
+   should the cameras be remounted independently of the grippers/arms?
+2. Should stereo visual odometry remain a separate pose correction into the EKF, or should RTAB-Map
+   consume fused odometry directly after topic separation is refactored?
+3. Are DWB and the current holonomic velocity mixer appropriate for this three-wheel geometry, or
+   would MPPI with a calibrated omni motion model provide materially safer local behavior?
+4. Is the current footprint/inflation policy sufficient for the cart and arm overhang throughout
+   the locked navigation pose?
+5. Which additional sensor is preferred for near-field, low-obstacle, transparent-object, and
+   cliff coverage given the wrist-camera occlusion?
+6. What measurable acceptance thresholds should gate the transition from dry-run to tethered
+   physical navigation?
