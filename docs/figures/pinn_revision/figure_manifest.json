@@ -1,0 +1,85 @@
+{
+  "checkpoint": "rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt",
+  "checkpoint_sha256": "58eca2885fdcc1bdd85ff8f05b04ed5e936ec517bd8323859f0656171af39948",
+  "device": "cpu",
+  "style": "SciencePlots science/no-latex",
+  "field_colormap": "turbo (blue-to-red)",
+  "naturalistic_panels": [
+    {
+      "dataset": "inD",
+      "geometry": "urban intersection",
+      "cache": "evaluation/pinn_prospective_v2_cache/inD_06",
+      "recording": "06",
+      "frame_index": 484,
+      "frame_id": 1068,
+      "selection_rule": "maximum integrated prospective teacher risk",
+      "split": "recording-disjoint held-out"
+    },
+    {
+      "dataset": "rounD",
+      "geometry": "roundabout",
+      "cache": "evaluation/pinn_prospective_multidataset_v4/rounD_01",
+      "recording": "01",
+      "frame_index": 59,
+      "frame_id": 197,
+      "selection_rule": "maximum integrated prospective teacher risk",
+      "split": "external zero-shot diagnostic"
+    },
+    {
+      "dataset": "exiD",
+      "geometry": "freeway merge/exit",
+      "cache": "evaluation/pinn_prospective_multidataset_v4/exiD_01",
+      "recording": "01",
+      "frame_index": 50,
+      "frame_id": 150,
+      "selection_rule": "maximum integrated prospective teacher risk",
+      "split": "external zero-shot diagnostic"
+    }
+  ],
+  "highwayenv_panels": [
+    {
+      "dataset": "highwayenv_highway_v0",
+      "cache": "evaluation/pinn_prospective_v2_cache/highwayenv_highway_v0_seed0100",
+      "recording": "seed0100",
+      "frame_index": 8,
+      "frame_id": 8,
+      "selection_rule": "maximum integrated prospective teacher risk"
+    },
+    {
+      "dataset": "highwayenv_merge_v0",
+      "cache": "evaluation/pinn_prospective_v2_cache/highwayenv_merge_v0_seed0100",
+      "recording": "seed0100",
+      "frame_index": 2,
+      "frame_id": 2,
+      "selection_rule": "maximum integrated prospective teacher risk"
+    },
+    {
+      "dataset": "highwayenv_intersection_v0",
+      "cache": "evaluation/pinn_prospective_v2_cache/highwayenv_intersection_v0_seed0100",
+      "recording": "seed0100",
+      "frame_index": 1,
+      "frame_id": 1,
+      "selection_rule": "maximum integrated prospective teacher risk"
+    },
+    {
+      "dataset": "highwayenv_roundabout_v0",
+      "cache": "evaluation/pinn_prospective_v2_cache/highwayenv_roundabout_v0_seed0100",
+      "recording": "seed0100",
+      "frame_index": 1,
+      "frame_id": 1,
+      "selection_rule": "maximum integrated prospective teacher risk"
+    }
+  ],
+  "quantitative_inputs": {
+    "fidelity_summary": "evaluation/pinn_prospective_context_v3_domain_conditioned/heldout_prospective_pinn_validation_summary.json",
+    "validity_summary": "evaluation/prospective_field_validity_pinn_v3/prospective_field_validity_summary.csv",
+    "backend_swap_summary": "evaluation/highwayenv_prospective_pinn_backend_swap_v3/backend_swap_summary.json"
+  },
+  "policy_error_propagation": {
+    "descriptor_rmse_mean": 0.004722905904054641,
+    "action_l2_mean": 6.679942525806837e-05,
+    "action_l2_p95_mean": 0.00046010681820916915,
+    "action_l2_gt_0_05_rate": 0.0
+  },
+  "interpretation_boundary": "inD and HighwayEnv are recording/seed-disjoint validation; rounD and exiD are external zero-shot diagnostics and are not pooled into the main fidelity claim."
+}

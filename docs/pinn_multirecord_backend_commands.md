@@ -11,35 +11,6 @@ This workflow keeps three questions separate:
 The PINN is accepted as a deployment backend only if all three checks pass.
 Existing paper checkpoints are not overwritten.
 
-## 0. Build the restorable source caches
-
-Naturalistic inD data are read from `data/inD` and split by recording before
-any normalization or training. The cache stage stores the instantaneous source,
-transport, diffusion, road mask, scene descriptors, and provenance manifest.
-
-```powershell
-python -m rl.train_context_pinn --stage cache `
-  --dataset inD --data-root data `
-  --calibration-recordings 01,02,03,04,05 `
-  --heldout-recordings 06,07,08,09,10,11 `
-  --cache-dir evaluation/pinn_teacher_cache `
-  --max-sec 44 --warmup-sec 4 --deployment-horizon 40
-
-python -m rl.cache_highwayenv_pinn_teacher `
-  --env-ids highway-v0 merge-v0 roundabout-v0 intersection-v0 `
-  --seeds 0:5 --traffic-preset medium --max-steps 40 `
-  --cache-dir evaluation/pinn_highway_teacher_cache
-
-python -m rl.cache_highwayenv_pinn_teacher `
-  --env-ids highway-v0 merge-v0 roundabout-v0 intersection-v0 `
-  --seeds 100:103 --traffic-preset medium --max-steps 40 `
-  --cache-dir evaluation/pinn_highway_teacher_cache
-```
-
-Dataset files and generated caches are excluded from Git. Each completed cache
-contains a manifest and memory-mappable arrays so interrupted training can be
-restarted without recomputing the teacher.
-
 ## 1. Cache the causal prospective teacher
 
 The teacher uses only the state available at the current sensing instant. It
@@ -141,7 +112,7 @@ evaluation protocol, not an early-stopping optimization.
 python -m rl.eval_highwayenv_backend_swap_sb3 `
   --algo ppo `
   --policy-checkpoint `
-    rl/checkpoints/highwayenv/prospective_merge_ppo_20k/best_model.zip `
+    rl/logs/revision_merge_ppo_continuous_fieldobs33_prospective_v3_20k_bounded/checkpoints/best_model.zip `
   --pinn-checkpoint `
     rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt `
   --env-id merge-v0 --action-mode continuous --ablation A5 `
@@ -219,6 +190,58 @@ Replace `merge-v0` with `roundabout-v0`, `intersection-v0`, or `highway-v0`
 for scenario-specific demonstrations. All overlays use the `turbo` blue-to-red
 scale: blue is low risk and red is high risk.
 
+## 7. Build the revision figures
+
+The main figure command consumes the recording-disjoint inD/HighwayEnv
+summaries, the frozen-policy backend-swap trace, and optional external
+naturalistic caches:
+
+```powershell
+python -m rl.plot_pinn_revision_evidence `
+  --checkpoint rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt `
+  --device cpu `
+  --output-dir evaluation/pinn_revision_figures_v4
+```
+
+It produces `pinn_naturalistic_scene_conditioning.pdf` and
+`pinn_highwayenv_fidelity_and_propagation.pdf` in SciencePlots style, together
+with a manifest containing the checkpoint hash, selected frames, selection
+rule, and quantitative input files. The qualitative frame rule is fixed to the
+maximum integrated numerical-teacher risk within the declared recording;
+annotated metrics are computed over all held-out frames rather than only the
+displayed frame.
+
+To create the optional rounD/exiD external-domain panels, first cache and
+ego-align the desired recordings, then build the prospective teacher:
+
+```powershell
+python -m rl.train_context_pinn --stage cache --dataset rounD `
+  --data-root data --calibration-recordings 00 --heldout-recordings 01 `
+  --cache-dir evaluation/pinn_teacher_cache_multidataset_v4 `
+  --max-sec 10 --warmup-sec 2 `
+  --output-dir evaluation/_unused_round_cache
+
+python -m rl.train_context_pinn --stage cache --dataset exiD `
+  --data-root data --calibration-recordings 00 --heldout-recordings 01 `
+  --cache-dir evaluation/pinn_teacher_cache_multidataset_v4 `
+  --max-sec 10 --warmup-sec 2 `
+  --output-dir evaluation/_unused_exid_cache
+
+python -m rl.augment_temporal_pinn_cache --cache-globs `
+  "evaluation/pinn_teacher_cache_multidataset_v4/rounD_*" `
+  "evaluation/pinn_teacher_cache_multidataset_v4/exiD_*" --rebuild
+
+python -m rl.build_prospective_pinn_cache --input-cache-globs `
+  "evaluation/pinn_teacher_cache_multidataset_v4/rounD_*" `
+  "evaluation/pinn_teacher_cache_multidataset_v4/exiD_*" `
+  --output-root evaluation/pinn_prospective_multidataset_v4 --rebuild
+```
+
+The accepted v3 checkpoint was calibrated on inD and HighwayEnv, not on rounD
+or exiD. Therefore these two panels are zero-shot external diagnostics. Do not
+pool them into the main fidelity estimate or call them cross-dataset validation
+unless a new recording-disjoint multi-dataset checkpoint is trained and tested.
+
 ## Acceptance rule
 
 Do not describe the PINN as a drop-in replacement if it fails independent
@@ -249,13 +272,11 @@ closed-loop backends complete all ten episodes without collision; the
 PINN-minus-teacher progress difference is -0.061 m (95% paired-bootstrap CI
 -0.076 to -0.046 m) over approximately 586 m.
 
-The stage-resolved timing result does **not** support an unconditional
-end-to-end acceleration claim. On paired held-out merge fields after ego-local
-conditioning, CUDA PINN requires 2.04 ms versus 2.64 ms for numerical
-propagation. Once online source construction, reprojection, context generation,
-transfer, and interpolation are included, the corresponding totals are 5.80
-and 5.21 ms in the concurrent-load diagnostic. CUDA therefore accelerates the
-learned operator but does not yet make the complete batch-size-one backend
-faster. Use the table and raw summaries in
-`docs/reproducibility/pinn_prospective_v3/`, and rerun them on an idle GPU before
-reporting final hardware latency.
+The timing result does **not** support an unconditional end-to-end acceleration
+claim. In the paired field-core benchmark after ego-local conditioning, the
+CUDA PINN takes 2.04 ms versus 2.64 ms for CPU numerical propagation. In the
+complete online query, however, scene/context construction and device transfer
+increase CUDA PINN latency to 5.80 ms versus 5.21 ms for the CPU numerical
+backend. Until context construction is kept on-device, cached, batched, or
+asynchronous, describe the PINN as a behaviorally interchangeable surrogate
+with a faster GPU kernel, not as a uniformly faster online backend.
