@@ -1,6 +1,6 @@
 % PINN revision text. Figure numbering is resolved through \label/\ref.
 
-\subsubsection{Naturalistic traffic replay}
+\subsubsection{Naturalistic replay and recording-disjoint construct validity}
 The field-query interface was examined on recorded traffic before its use in
 closed-loop decision making. At each sensing instant, the measured vehicle
 states are transformed to an ego-local frame and encoded as source, transport,
@@ -29,44 +29,127 @@ juxtaposed as independent local-grid images.
   \label{fig:pinn-naturalistic-overlay}
 \end{figure*}
 
-The overlay is an interpretability check, not an accuracy test. In particular,
-the apparent extent or smoothness of a heatmap does not establish that one
-backend produces safer or more human-compatible decisions. Construct validity
-is therefore evaluated separately against the observed three-second future
-occupancy envelope on recording-disjoint inD data. This target is computed
-from future trajectories and uses neither the PDE source variables nor the RL
-reward. The instantaneous source obtains AUROC/AUPRC values of
-$0.8249/0.4167$, while the frozen PINN obtains $0.8657/0.5143$; the
-recording-bootstrap paired gains are $0.0408$ ($95\%$ CI
-$[0.0190,0.0576]$) and $0.0976$ ($95\%$ CI $[0.0720,0.1207]$), respectively.
-These results support predictive relevance to near-future traffic occupancy,
-but do not interpret the field as a calibrated collision probability.
+\paragraph{Role of the context-conditioned PINN.}
+Let $\mathcal{S}_{H}$ denote the numerical transport--diffusion operator over
+the prospective horizon $H$ and let $\mathbf{q}_{t}$ collect only information
+available at sensing time $t$, including the instantaneous source,
+longitudinal and lateral transport, diffusion, occupancy, and road-support
+channels. The numerical teacher evaluates
+$R^{\mathrm{num}}_{t}=\mathcal{S}_{H}(\mathbf{q}_{t})$ by repeated integration,
+whereas the frozen network evaluates
+$\widehat R_{t}=f_{\theta}(\mathbf{q}_{t})$ in one differentiable computation.
+The purpose of $f_{\theta}$ is therefore to amortize a nonlocal finite-horizon
+operator across scenes, not to relabel the teacher as empirical ground truth.
+Its fixed computation graph supports batched GPU queries and direct spatial
+derivatives, while the physics residual and gradient-matching losses restrict
+solutions that fit snapshot values but violate the teacher dynamics. The
+network was calibrated on inD recordings 01--05 and Highway-env seeds 0--2
+from four topologies; inD recordings 06--11 and Highway-env seeds 100--102
+were excluded from parameter fitting and normalization. Future trajectories,
+collision outcomes, RL returns, and social scores were not used as PINN
+training targets.
+
+This context-conditioned formulation replaces the earlier recording-specific
+surrogate with one operator that is queried from the current scene tensor. The
+recordings supply heterogeneous traffic states and road geometries at which
+the operator is learned; they do not supply a hindsight risk label to the
+training loss. Consequently, naturalistic behavior enters through the measured
+state and transport context, while the transport--diffusion equation remains
+the mechanistic prior. The numerical solver is retained as the auditable
+reference, whereas the PINN provides a fixed-depth, differentiable, and
+batchable implementation for repeated online queries.
+
+The overlay in Fig.~\ref{fig:pinn-naturalistic-overlay} is an interpretability
+and coordinate-registration check, not an accuracy test. In particular, a
+smoother or smaller heatmap does not establish a safer or more naturalistic
+planner. We consequently test the prospective spatial construct against the
+observed three-second future occupancy envelope on recording-disjoint inD
+data. This label is formed only from subsequently observed vehicle trajectories
+and is independent of both the PDE source and the RL reward. The instantaneous
+source obtains AUROC/AUPRC values of $0.8249/0.4167$, propagation by the numerical
+teacher raises them to $0.9096/0.5836$, and the frozen PINN obtains
+$0.8657/0.5143$. Relative to the source-only control, the PINN gains are
+$0.0408$ (recording-bootstrap $95\%$ CI $[0.0190,0.0576]$) and $0.0976$
+($[0.0720,0.1207]$), respectively. Thus, the learned query retains predictive
+structure associated with the nonlocal propagation rather than merely
+reproducing the instantaneous source amplitude. The numerical teacher remains
+the higher-fidelity reference, and neither field is interpreted as a
+calibrated collision probability.
 
 \subsubsection{Decision-level numerical-to-PINN substitution}
-Practical comparison is conducted after descriptor extraction and policy
-inference. For each scenario and traffic seed, one frozen field-observing
-policy is executed twice, replacing only the prospective numerical query with
-the PINN query. Paired episodes report collision, minimum time to collision,
-corridor-risk exposure, progress, speed, jerk, imposed follower deceleration,
-backward risk flux, and query latency. Confidence intervals are obtained by
-paired bootstrap over traffic seeds; two-sided paired randomization tests are
-adjusted by the Holm procedure across the reported scenario--metric
-comparisons. Efficiency superiority is claimed only if progress increases
-while the safety, comfort, and social-externality indicators remain
-non-degraded.
+The influence of approximation error is evaluated at three successive
+interfaces. First, held-out fields are compared only where the numerical
+gradient is active, because an angle at a near-zero gradient is undefined and
+cannot direct a maneuver. Second, synchronized simulator states are passed
+through both backends. The resulting eight-dimensional descriptor
+$\mathbf{o}^{R}_{t}=[R_{0},R_{5},R_{10},R_{20},\partial_xR,
+\partial_yR,R_{L},R_{R}]$ is normalized by fixed calibration scales and clipped
+to $[-3,3]$ before it enters the frozen policy. This test measures
+$\|\Delta\mathbf{o}^{R}_{t}\|$ and
+$\|\pi_{\phi}(\mathbf{o}_{t},\mathbf{o}^{R,\mathrm{PINN}}_{t})-
+\pi_{\phi}(\mathbf{o}_{t},\mathbf{o}^{R,\mathrm{num}}_{t})\|_{2}$ directly;
+it does not assume that a percentage field-gradient error produces the same
+percentage action error. Third, for each traffic seed, the same policy is
+executed in paired closed-loop episodes while replacing only the query
+backend. Collision, minimum time to collision, corridor-risk exposure,
+progress, speed, jerk, imposed follower deceleration, backward risk flux, and
+latency are then compared. Confidence intervals are obtained by paired
+bootstrap over traffic seeds, and multiplicity is controlled across the
+predeclared scenario--metric comparisons.
 
-The currently completed merge swap is best interpreted as a substitution
-test, not as evidence that the PINN is intrinsically less conservative. Across
-ten paired seeds, both backends produce zero collisions and equal episode
-length. Mean progress changes from $585.533$ to $585.473$~m
-($\Delta=-0.061$~m), mean speed changes by $-0.0074$~m/s, and mean absolute
-jerk changes by $-2.52\times10^{-4}$~m/s$^3$. The complete online field query
-is also slower for the present CPU deployment ($6.97$ versus $3.88$~ms), even
-though the isolated GPU neural kernel is faster in the field-core benchmark.
-Accordingly, the revised claim is that the tested PINN preserves merge-policy
-behavior to practical tolerance. A stronger safety--efficiency claim requires
-the matched highway, intersection, and roundabout specialist swaps and cannot
-be inferred from field magnitude alone.
+Equivalently, the analysis follows the composed map
+$R\xrightarrow{\mathcal D}\mathbf{o}^{R}
+\xrightarrow{\pi_{\phi}}\mathbf{u}\xrightarrow{\mathcal E}\mathbf{Y}$,
+where $\mathcal D$ is the descriptor extractor, $\pi_{\phi}$ is the frozen
+policy, $\mathcal E$ denotes closed-loop environment evolution, and
+$\mathbf{Y}$ collects safety, progress, comfort, and externality outcomes.
+For an individual synchronized state, a local relation
+$\|\Delta\mathbf{u}_{t}\|_{2}\leq
+L_{\pi,t}\|\Delta\mathbf{o}^{R}_{t}\|_{2}$ may be written, but no global
+Lipschitz constant is assumed for the neural policy. Instead, both terms are
+measured on the paired state sequence and the residual effect is tested by the
+backend intervention at the level of $\mathbf{Y}$.
+
+The completed merge swap is a non-inferiority-style substitution test, not
+evidence that the PINN is intrinsically less conservative. Across ten paired
+seeds, the descriptor RMSE is $4.72\times10^{-3}$, the mean action-vector
+difference is $6.68\times10^{-5}$, and no synchronized query exceeds the
+predeclared action tolerance $\|\Delta\mathbf{u}\|_{2}=0.05$. Both backends
+produce zero collisions and equal episode lengths. Mean progress changes from
+$585.533$ to $585.473$~m ($\Delta=-0.061$~m; $95\%$ paired-bootstrap CI
+$[-0.076,-0.046]$~m), mean speed changes by $-0.0074$~m/s, and mean absolute
+jerk changes by $-2.52\times10^{-4}$~m/s$^{3}$. These magnitudes support
+behavior-preserving substitution for this merge policy, but not superior
+planning. The isolated CUDA field kernel is faster than the CPU numerical
+core ($2.04$ versus $2.64$~ms), whereas the complete online query remains
+slightly slower after context construction and host--device transfer
+($5.80$ versus $5.21$~ms). The deployment advantage is therefore a
+differentiable, batchable, fixed-cost surrogate whose present end-to-end
+latency still requires on-device context construction; the numerical solver
+remains available as the selectable validation reference and fallback.
+
+These experiments separate three claims that were conflated in the original
+manuscript. First, propagation is evaluated against an instantaneous-source
+control using future occupancy that is unavailable to either field model;
+this tests whether the nonlocal construction carries prospective interaction
+information. Second, the numerical-to-PINN swap tests whether amortization
+preserves the descriptors and decisions of the physics-based reference. Third,
+the downstream observation--reward factorial evaluates whether supplying a
+field descriptor, changing the objective, or their interaction alters
+closed-loop driving. Accordingly, improvements over native RL are attributed
+to the field representation and the social objective only when supported by
+that factorial comparison. The demonstrated advantage of the present PINN over
+online numerical integration is its differentiable, batchable query interface
+with behaviorally equivalent merge execution; the evidence does not support a
+claim that smoothing the numerical field by itself improves planning. This
+separation retains the mechanistic prior supplied by the PDE while preventing
+surrogate approximation, risk validity, and policy benefit from being inferred
+from one reconstruction statistic. Thus, relative to the instantaneous source,
+the propagated representation carries additional recording-disjoint
+information about future occupancy; relative to online numerical integration,
+the PINN retains policy-relevant behavior through an amortized query; and any
+driving improvement over native RL is attributed only through the separate
+observation--reward factorial.
 
 % ---------------------------------------------------------------------------
 % Response letter text
@@ -78,29 +161,62 @@ interaction risk rather than reproducing manually injected surrogate
 variables?}
 
 \noindent\textbf{Response:}
-We agree that agreement with the hand-designed numerical teacher is not, by
-itself, evidence of genuine interaction risk. We therefore separated teacher
-fidelity from construct validity and added a recording-disjoint evaluation
-whose target is generated directly from observed future trajectories. inD
-recordings 01--05 are used for calibration and recordings 06--11 are held out.
-At every evaluated frame, each candidate field is compared with the observed
-vehicle-occupancy envelope over the following three seconds; this target uses
-neither the PDE source terms nor the reinforcement-learning reward. Relative
-to the instantaneous source, the frozen PINN increases AUROC from $0.8249$ to
-$0.8657$ and AUPRC from $0.4167$ to $0.5143$. The paired improvements are
-$0.0408$ (95\% CI $[0.0190,0.0576]$) and $0.0976$ (95\% CI
-$[0.0720,0.1207]$), respectively. We have narrowed the manuscript claim to
-predictive relevance for near-future occupancy rather than calibrated
-collision probability. We also rebuilt the qualitative replay through the
-official dataset coordinate transform (Fig.~\ref{fig:pinn-naturalistic-overlay});
-the rounD and exiD scenes are explicitly identified as external qualitative
-replays and are not pooled into the recording-disjoint result.
+We agree with the distinction underlying this comment. Reconstructing a
+hand-designed teacher establishes surrogate fidelity, but it cannot establish
+that the teacher variable corresponds to interaction risk. We therefore
+separated the revised validation into two hypotheses and ensured that the
+second hypothesis uses evidence unavailable during PINN training.
+
+For surrogate fidelity, the network is trained only to approximate the causal
+three-second transport--diffusion operator and its spatial gradient, subject
+to a physics residual. The inputs contain the scene state available at the
+current sensing instant; neither future trajectories nor collision, reward,
+or social-score labels enter the teacher cache or PINN loss. Calibration uses
+inD recordings 01--05 and Highway-env training seeds 0--2. Domain-specific
+normalization is fitted on that calibration set only and then frozen.
+
+For construct validity, we evaluate on the disjoint inD recordings 06--11 and
+form an independent target from the vehicle occupancy observed during the
+subsequent three seconds. This target is not a PDE source component and is not
+used by the RL objective. We compare three progressively richer quantities:
+the instantaneous hand-designed source, the propagated numerical field, and
+the frozen PINN query. The source-only control obtains AUROC/AUPRC values of
+$0.8249/0.4167$; propagation raises these values to $0.9096/0.5836$; and the
+PINN retains $0.8657/0.5143$. Relative to source only, the PINN gains are
+$0.0408$ (recording-bootstrap 95\% CI $[0.0190,0.0576]$) and $0.0976$
+($[0.0720,0.1207]$). Because the resampling unit is the recording rather than
+the frame, the intervals do not treat temporally correlated snapshots as
+independent samples. The result shows that the propagated representation
+contains recording-disjoint information about where traffic will occupy the
+scene beyond the instantaneous injected source. It does not prove causality,
+nor do we describe either output as a calibrated probability of collision.
+
+This comparison is a direct falsification test of the ``source-copying''
+explanation. If the learned field contained only a monotone reproduction of
+the current source amplitude, it could not improve the ranking of a target
+constructed exclusively from later recorded occupancy relative to that source
+under a recording-disjoint split. The positive paired gains therefore reject
+that restricted explanation for the tested construct, while the remaining gap
+to the numerical teacher quantifies information lost by amortization. We have
+made this evidential boundary explicit: the experiment supports prospective
+interaction relevance, not a causal or probabilistic definition of risk and
+not human-preference learning.
+
+Finally, Fig.~\ref{fig:pinn-naturalistic-overlay} now uses the official
+world-to-orthophoto calibration and recorded bounding boxes at a common frame.
+The inD row is part of the recording-disjoint test; rounD and exiD are clearly
+labeled zero-shot qualitative replays and are not pooled into the numerical
+claim. This visual check verifies registration and qualitative topology, while
+the future-occupancy test supplies the independent quantitative evidence.
 
 \noindent\textbf{Changes in the manuscript:}
-We added the recording-disjoint future-occupancy test, clarified its independent
-target and confidence-interval unit, and replaced the former local-grid montage
-with orthophoto-calibrated naturalistic replays. Absolute-error maps and
-fidelity statistics were removed from the qualitative figure.
+We added the subsection ``Naturalistic replay and recording-disjoint
+construct validity,'' specified the calibration/evaluation recordings and
+label construction, reported source-only, numerical, and PINN results with
+recording-bootstrap intervals, and narrowed the claim from ``learned collision
+risk'' to ``predictive relevance for near-future interaction occupancy.'' We
+also replaced the local-grid montage with orthophoto-calibrated replays and
+removed error statistics from the qualitative figure.
 
 \medskip
 \noindent\textbf{Reviewer comment:}
@@ -109,24 +225,68 @@ deceleration, or lane-change decisions, but the paper does not analyze how PINN
 approximation error propagates into policy performance.}
 
 \noindent\textbf{Response:}
-We agree that a grid-level gradient error cannot establish policy robustness.
-We therefore added two downstream tests. First, identical frozen states are
-passed through the numerical and PINN descriptor backends and then through the
-same policy. On ten merge seeds, the eight-dimensional descriptor RMSE is
-$4.72\times10^{-3}$, the mean action-vector difference is
-$6.68\times10^{-5}$, and no query yields
-$\lVert\Delta u\rVert_2>0.05$. Second, the backend is replaced in actual paired
-closed-loop episodes. Both merge backends remain collision-free and complete
-the same number of steps, while progress differs by only $-0.061$~m over
-approximately $586$~m. These results show that the observed approximation error
-is strongly attenuated for the tested merge policy. We do not generalize this
-finding to other topologies. The revised protocol therefore evaluates matched
-scenario-specific policies on highway, merge, intersection, and roundabout,
-and reports paired safety, efficiency, comfort, social-externality, and runtime
-outcomes rather than inferring control quality from field error.
+We agree that field-level gradient error alone is insufficient. We also note
+that an angular error is not a direct percentage error in steering or
+acceleration: the angle is unstable where the reference gradient is nearly
+zero, and the policy receives eight normalized descriptors together with the
+native traffic observation rather than applying the raw gradient as a control
+command. We therefore restrict the angular diagnostic to active-gradient
+cells and test error propagation at the actual policy interface.
+
+The revised analysis has three levels. First, it reports topology-specific
+field correlation, active-gradient angle, and equal-mass hotspot overlap on
+held-out Highway-env frames. The aggregate active-gradient error is
+$13.8^{\circ}$, with $7.4^{\circ}$ in merge; roundabout is explicitly reported
+as the weakest topology rather than hidden in an average. Second, for
+synchronized states, both backends produce the eight-dimensional vector
+$[R_{0},R_{5},R_{10},R_{20},\partial_xR,\partial_yR,R_L,R_R]$. The risk and
+gradient channels are normalized using fixed calibration scales and clipped
+to $[-3,3]$ before the same frozen policy is queried. On ten merge seeds, the
+descriptor RMSE is $4.72\times10^{-3}$, the mean action-vector difference is
+$6.68\times10^{-5}$, and none of the paired actions exceeds the predeclared
+tolerance $\lVert\Delta\mathbf{u}\rVert_2=0.05$. This directly measures the
+policy's local sensitivity and avoids assuming an unavailable global
+Lipschitz constant.
+
+Formally, we audit the entire composition
+$R\xrightarrow{\mathcal D}\mathbf{o}^{R}
+\xrightarrow{\pi_{\phi}}\mathbf{u}\xrightarrow{\mathcal E}\mathbf{Y}$ rather
+than treating an angular field statistic as a control error. Although a local
+bound $\|\Delta\mathbf{u}_{t}\|_{2}\leq
+L_{\pi,t}\|\Delta\mathbf{o}^{R}_{t}\|_{2}$ exists wherever the policy is
+locally Lipschitz, we do not estimate or assume a global constant. Paired
+queries at identical states directly measure descriptor and action changes,
+and the backend swap then measures whether their accumulation alters safety,
+progress, comfort, or externality outcomes.
+
+Third, we perform an actual closed-loop intervention: the simulator, policy,
+traffic seed, and reward are fixed, and only the numerical/PINN query backend
+is exchanged. Both merge backends complete all ten episodes without collision
+and with identical episode lengths. PINN-minus-numerical progress is
+$-0.061$~m (95\% paired-bootstrap CI $[-0.076,-0.046]$~m) over approximately
+$586$~m, while mean speed and mean absolute jerk change by only
+$-0.0074$~m/s and $-2.52\times10^{-4}$~m/s$^3$, respectively. We interpret
+this as behavior-preserving substitution for the tested merge policy, not as
+evidence of universal robustness or superior planning. The claim for any
+additional topology is gated by the same paired descriptor, action, safety,
+progress, comfort, and externality checks.
+
+We also revised the computational claim. A paired batch-one benchmark uses 20
+held-out merge frames, ten warm-up calls per backend, and excludes model
+loading and rendering. The isolated CUDA network kernel is faster than the CPU
+numerical field core ($2.04$ versus $2.64$~ms), but the complete CUDA query is
+currently $5.80$~ms versus $5.21$~ms because scene encoding and host--device
+transfer remain off-device. Policy inference, field query, environment step,
+and rendering are reported as separate quantities. Thus, the present benefit
+is a differentiable and batchable amortized operator with verified behavioral
+interchangeability in merge; end-to-end acceleration is not claimed until
+context construction is moved on-device.
 
 \noindent\textbf{Changes in the manuscript:}
-The discussion now distinguishes field-level diagnostics, synchronized
-descriptor-to-action propagation, and paired closed-loop outcomes. The merge
-result is presented as behavior-preserving substitution, while the broader
-claim is explicitly conditional on the completed four-scenario policy swap.
+We added the subsection ``Decision-level numerical-to-PINN substitution,''
+defined the active-gradient mask and descriptor preprocessing, and reported
+the synchronized descriptor/action test together with the paired closed-loop
+merge result. The runtime table now separates field-core latency,
+context/transfer overhead, and complete query latency. The text presents the
+merge result as a bounded non-inferiority result and explicitly reports the
+weak roundabout fidelity instead of extrapolating from the aggregate error.
