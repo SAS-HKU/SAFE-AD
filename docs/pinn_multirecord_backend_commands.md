@@ -147,6 +147,80 @@ The field-core benchmark starts after ego-local scene conditioning. The
 closed-loop backend-swap table remains the authoritative online latency test.
 Do not combine either value with rendering time or one-time model loading.
 
+### Four-scenario planning comparison
+
+The merge checkpoint above cannot be reused as a four-scenario headline result.
+Highway, merge, and roundabout expose a 33-D field observation, whereas the
+intersection exposes 113 entries (105 base + the same eight field descriptors).
+Train one matched continuous-control specialist per scenario and keep the
+prospective numerical backend fixed during training. This lets evaluation
+replace only the field-query backend while holding the policy, traffic seed,
+reward, and action space fixed.
+
+The following SAC runs should start only after the active MetaDrive CUDA batch
+has completed:
+
+```powershell
+$scenarios = @{
+  highway     = "highway-v0"
+  merge       = "merge-v0"
+  intersection = "intersection-v0"
+  roundabout  = "roundabout-v0"
+}
+
+foreach ($name in $scenarios.Keys) {
+  $envId = $scenarios[$name]
+  python -m rl.train_highwayenv_social_sb3 `
+    --algo sac --env-id $envId --eval-env-id $envId `
+    --interface stock --action-mode continuous `
+    --reward-config rl/config/social_reward_v1.json --ablation A5 `
+    --use-drift true --append-risk-obs true `
+    --field-backend prospective --traffic-preset medium `
+    --total-steps 500000 --eval-freq 25000 --eval-episodes 5 `
+    --eval-max-steps 600 --n-envs 1 --seed 2026 `
+    --run-dir "rl/logs/revision_${name}_sac_fieldobs_prospective_500k" `
+    --device cuda
+}
+```
+
+Evaluate each specialist on paired, unseen traffic seeds:
+
+```powershell
+$scenarios = @{
+  highway     = "highway-v0"
+  merge       = "merge-v0"
+  intersection = "intersection-v0"
+  roundabout  = "roundabout-v0"
+}
+
+foreach ($name in $scenarios.Keys) {
+  $envId = $scenarios[$name]
+  python -m rl.eval_highwayenv_backend_swap_sb3 `
+    --algo sac `
+    --policy-checkpoint "rl/logs/revision_${name}_sac_fieldobs_prospective_500k/checkpoints/best_model.zip" `
+    --pinn-checkpoint rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt `
+    --env-id $envId --action-mode continuous --ablation A5 `
+    --traffic-preset medium --seeds 100:130 --pinn-device cpu `
+    --max-episode-steps 600 --bootstrap 5000 `
+    --output-dir "evaluation/highwayenv_pinn_planning_${name}"
+}
+```
+
+Aggregate the four paired episode files only after all scenarios are present:
+
+```powershell
+python -m rl.plot_highwayenv_pinn_planning_results `
+  --episodes-csv "evaluation/highwayenv_pinn_planning_*/backend_swap_episodes.csv" `
+  --bootstrap 5000 --permutations 20000 `
+  --output-dir evaluation/highwayenv_pinn_planning_comparison
+```
+
+The aggregate table reports paired confidence intervals, randomization tests,
+and Holm-adjusted p-values. An efficiency claim requires higher paired route
+progress while collision, TTC, jerk, and imposed follower deceleration remain
+non-degraded. A visually smaller PINN field is not itself evidence of better
+planning.
+
 For a stage-resolved online check without policy or rendering cost, run:
 
 ```powershell
@@ -192,24 +266,26 @@ scale: blue is low risk and red is high risk.
 
 ## 7. Build the revision figures
 
-The main figure command consumes the recording-disjoint inD/HighwayEnv
-summaries, the frozen-policy backend-swap trace, and optional external
-naturalistic caches:
+Build the naturalistic replay through the official track-import coordinate
+pipeline. The script rotates each ego-local cached field back to the recorded
+world pose and then applies the orthophoto calibration used for vehicle
+bounding boxes:
 
 ```powershell
-python -m rl.plot_pinn_revision_evidence `
+python -m rl.plot_dataset_pinn_orthophoto `
   --checkpoint rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt `
   --device cpu `
-  --output-dir evaluation/pinn_revision_figures_v4
+  --data-root data `
+  --output-dir evaluation/pinn_revision_figures_v5
 ```
 
-It produces `pinn_naturalistic_scene_conditioning.pdf` and
-`pinn_highwayenv_fidelity_and_propagation.pdf` in SciencePlots style, together
-with a manifest containing the checkpoint hash, selected frames, selection
-rule, and quantitative input files. The qualitative frame rule is fixed to the
-maximum integrated numerical-teacher risk within the declared recording;
-annotated metrics are computed over all held-out frames rather than only the
-displayed frame.
+It produces `pinn_naturalistic_orthophoto_overlay.pdf` in SciencePlots style,
+together with a manifest containing the checkpoint hash, official recording
+and frame identifiers, ego track, display calibration, and selection rule. The
+figure contains only numerical/PINN scene overlays; it deliberately omits
+absolute-error maps and fidelity statistics. Quantitative teacher-to-PINN
+claims belong in the independent construct-validity table, while the practical
+comparison belongs in the paired planning evaluation above.
 
 To create the optional rounD/exiD external-domain panels, first cache and
 ego-align the desired recordings, then build the prospective teacher:
