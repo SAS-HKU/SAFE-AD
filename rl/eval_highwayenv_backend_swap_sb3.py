@@ -21,6 +21,58 @@ from rl.eval_highwayenv_social_sb3 import (
 )
 
 
+def _validate_field_policy_space(
+    model,
+    *,
+    env_ids: list[str],
+    traffic,
+    reward_config,
+    ablation: str,
+    action_mode: str,
+    pinn_checkpoint: str,
+    pinn_device: str,
+) -> dict[str, dict[str, int]]:
+    """Verify that each checkpoint observes the base state plus eight field entries."""
+    expected = int(np.prod(model.observation_space.shape))
+    result: dict[str, dict[str, int]] = {}
+    for env_id in env_ids:
+        common = dict(
+            env_id=env_id,
+            interface="stock",
+            render_mode=None,
+            traffic=traffic,
+            reward_config=reward_config,
+            ablation=ablation,
+            use_drift=True,
+            action_mode=action_mode,
+            record_risk_metrics=False,
+            field_backend="prospective",
+            pinn_checkpoint=pinn_checkpoint,
+            pinn_device=pinn_device,
+        )
+        base = make_social_highwayenv_env(append_risk_obs=False, **common)
+        field = make_social_highwayenv_env(append_risk_obs=True, **common)
+        try:
+            base_dim = int(np.prod(base.observation_space.shape))
+            field_dim = int(np.prod(field.observation_space.shape))
+        finally:
+            base.close()
+            field.close()
+        if field_dim != base_dim + 8:
+            raise ValueError(
+                f"{env_id} field observation has {field_dim} entries; expected "
+                f"base {base_dim} + 8"
+            )
+        if expected != field_dim:
+            raise ValueError(
+                f"Checkpoint expects {expected} observations, but {env_id} requires "
+                f"{field_dim} ({base_dim} base + 8 field descriptors). Use the "
+                "scenario-specific field-observing checkpoint."
+            )
+        result[env_id] = {"base_dim": base_dim, "field_dim": field_dim}
+    return result
+
+
 def _seeds(value: str) -> list[int]:
     value = value.strip()
     if ":" in value:
@@ -180,12 +232,18 @@ def main() -> int:
     args = parser.parse_args()
     model = load_sb3_model(args.algo, args.policy_checkpoint)
     expected = int(np.prod(model.observation_space.shape))
-    if expected != 33:
-        raise ValueError(
-            f"A true field-observation backend swap requires a 33-D policy; checkpoint expects {expected}"
-        )
     traffic = resolve_traffic_config(preset=args.traffic_preset)
     reward_config = load_reward_config(args.reward_config)
+    observation_spaces = _validate_field_policy_space(
+        model,
+        env_ids=list(args.env_id),
+        traffic=traffic,
+        reward_config=reward_config,
+        ablation=args.ablation,
+        action_mode=args.action_mode,
+        pinn_checkpoint=args.pinn_checkpoint,
+        pinn_device=args.pinn_device,
+    )
     rows = []
     traces = []
     for env_id in args.env_id:
@@ -247,9 +305,16 @@ def main() -> int:
         "crashed",
         "progress",
         "mean_speed",
+        "mean_abs_accel",
         "mean_jerk_abs",
+        "action_change_rate",
         "ttc_min",
+        "thw_min",
+        "drac_max",
         "imposed_rear_decel_max",
+        "corridor_risk_mean",
+        "risk_flux_mean",
+        "mean_action_selection_ms",
         "mean_field_backend_ms",
     )
     comparisons = []
@@ -289,6 +354,7 @@ def main() -> int:
         "policy_checkpoint": str(Path(args.policy_checkpoint).resolve()),
         "pinn_checkpoint": str(Path(args.pinn_checkpoint).resolve()),
         "policy_observation_dim": expected,
+        "scenario_observation_spaces": observation_spaces,
         "swap_is_actual_closed_loop": True,
         "counterfactual_trace_uses_synchronized_teacher_actions": True,
         "paired_seeds": list(args.seeds),
