@@ -239,6 +239,37 @@ def _risk_scale(teacher: np.ndarray, prediction: np.ndarray) -> float:
     return max(float(np.percentile(values, 98.5)) if values.size else 1.0, 1e-6)
 
 
+def _landscape_viewport(
+    pixel_x: np.ndarray,
+    pixel_y: np.ndarray,
+    *,
+    box_aspect: float = 0.58,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Return a centered, equal-scale viewport shared by every panel shape."""
+    finite_x = pixel_x[np.isfinite(pixel_x)]
+    finite_y = pixel_y[np.isfinite(pixel_y)]
+    if not finite_x.size or not finite_y.size:
+        raise ValueError("The transformed field grid contains no finite coordinates")
+
+    x0, x1 = float(np.min(finite_x)), float(np.max(finite_x))
+    y0, y1 = float(np.min(finite_y)), float(np.max(finite_y))
+    center_x = 0.5 * (x0 + x1)
+    center_y = 0.5 * (y0 + y1)
+    requested_width = 1.07 * max(x1 - x0, 1.0)
+    requested_height = 1.14 * max(y1 - y0, 1.0)
+
+    # Match the data-limit ratio to the physical axes ratio. This preserves
+    # map geometry without letting Matplotlib resize diagonal scenes through
+    # ``adjustable='datalim'``. Orthophoto-edge overrun remains black and is
+    # intentionally not clamped, so a boundary scene is not shifted off-centre.
+    width = max(requested_width, requested_height / box_aspect)
+    height = box_aspect * width
+    return (
+        (center_x - 0.5 * width, center_x + 0.5 * width),
+        (center_y + 0.5 * height, center_y - 0.5 * height),
+    )
+
+
 def _draw_vehicles(
     axis,
     tracks: list[dict],
@@ -289,6 +320,9 @@ def _draw_panel(
     ego_track_id: int,
     display_scale: float,
 ) -> None:
+    x_limits, y_limits = _landscape_viewport(pixel_x, pixel_y)
+    axis.set_xlim(*x_limits)
+    axis.set_ylim(*y_limits)
     axis.imshow(image, origin="upper", zorder=0)
     smoothed = gaussian_filter(np.maximum(np.asarray(field, dtype=float), 0.0), 1.15)
     normalized = np.clip(smoothed / scale, 0.0, 1.0)
@@ -314,22 +348,16 @@ def _draw_panel(
         ego_track_id,
         display_scale,
     )
-    finite_x = pixel_x[np.isfinite(pixel_x)]
-    finite_y = pixel_y[np.isfinite(pixel_y)]
-    x0, x1 = float(np.min(finite_x)), float(np.max(finite_x))
-    y0, y1 = float(np.min(finite_y)), float(np.max(finite_y))
-    pad_x = 0.035 * max(x1 - x0, 1.0)
-    pad_y = 0.07 * max(y1 - y0, 1.0)
-    height, width = image.shape[:2]
-    axis.set_xlim(max(0.0, x0 - pad_x), min(float(width - 1), x1 + pad_x))
-    axis.set_ylim(min(float(height - 1), y1 + pad_y), max(0.0, y0 - pad_y))
     axis.set_facecolor("black")
-    # Keep every manuscript panel landscape.  ``datalim`` expands the visible
-    # orthophoto context when the ego-local grid is diagonal instead of
-    # distorting the map or shrinking the physical axes.
+    # The data and axes ratios are identical, so ``auto`` keeps the official
+    # orthophoto geometry while all six physical axes retain the same size.
     axis.set_box_aspect(0.58)
-    axis.set_aspect("equal", adjustable="datalim")
-    axis.axis("off")
+    axis.set_aspect("auto")
+    axis.set_anchor("C")
+    axis.set_xticks([])
+    axis.set_yticks([])
+    for spine in axis.spines.values():
+        spine.set_visible(False)
 
 
 def main() -> int:

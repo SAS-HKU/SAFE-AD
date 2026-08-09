@@ -1,0 +1,46 @@
+{
+  "checkpoint": "rl/checkpoints/pinn/pinn_prospective_context_v3_domain_conditioned.pt",
+  "checkpoint_sha256": "58eca2885fdcc1bdd85ff8f05b04ed5e936ec517bd8323859f0656171af39948",
+  "device": "cpu",
+  "coordinate_pipeline": "ego-local field -> official recorded ego pose -> dataset world coordinates -> x/orthoPxToMeter, -y/orthoPxToMeter -> orthophoto display scale",
+  "normalization": "shared within each dataset row; 98.5th percentile of teacher and PINN",
+  "panels": [
+    {
+      "dataset": "rounD",
+      "recording": "00",
+      "frame_id": 182,
+      "ego_track_id": 24,
+      "cache_index": 66,
+      "selection_rule": "maximum integrated numerical-teacher risk among frames whose cached ego is a passenger or heavy road vehicle",
+      "cache": "evaluation/pinn_prospective_multidataset_v4/rounD_00",
+      "background": "data/rounD/00_background.png",
+      "display_scale": 10.0,
+      "status": "external replay"
+    },
+    {
+      "dataset": "inD",
+      "recording": "06",
+      "frame_id": 1068,
+      "ego_track_id": 20,
+      "cache_index": 484,
+      "selection_rule": "maximum integrated numerical-teacher risk among frames whose cached ego is a passenger or heavy road vehicle",
+      "cache": "evaluation/pinn_prospective_v2_cache/inD_06",
+      "background": "data/inD/06_background.png",
+      "display_scale": 12.0,
+      "status": "recording-disjoint test"
+    },
+    {
+      "dataset": "exiD",
+      "recording": "01",
+      "frame_id": 150,
+      "ego_track_id": 6,
+      "cache_index": 50,
+      "selection_rule": "maximum integrated numerical-teacher risk among frames whose cached ego is a passenger or heavy road vehicle",
+      "cache": "evaluation/pinn_prospective_multidataset_v4/exiD_01",
+      "background": "data/exiD/01_background.png",
+      "display_scale": 1.0,
+      "status": "external replay"
+    }
+  ],
+  "interpretation_boundary": "inD is recording-disjoint. rounD and exiD are external qualitative replays because this checkpoint was not calibrated on those datasets."
+}
